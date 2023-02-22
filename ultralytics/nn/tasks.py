@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from ultralytics.nn.modules import (C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x, Classify,
                                     Concat, Conv, ConvTranspose, Detect, DWConv, DWConvTranspose2d, Ensemble, Focus,
-                                    GhostBottleneck, GhostConv, Segment)
+                                    GhostBottleneck, GhostConv, Segment, Critic)
 from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, yaml_load
 from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, initialize_weights, intersect_dicts, make_divisible,
@@ -21,7 +21,7 @@ class BaseModel(nn.Module):
     The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family.
     """
 
-    def forward(self, x, profile=False, visualize=False):
+    def forward(self, x, profile=False, visualize=False, gan = False):
         """
         Forward pass of the model on a single scale.
         Wrapper for `_forward_once` method.
@@ -34,9 +34,9 @@ class BaseModel(nn.Module):
         Returns:
             (torch.Tensor): The output of the network.
         """
-        return self._forward_once(x, profile, visualize)
+        return self._forward_once(x, profile, visualize, gan = False)
 
-    def _forward_once(self, x, profile=False, visualize=False):
+    def _forward_once(self, x, profile=False, visualize=False, gan = False):
         """
         Perform a forward pass through the network.
 
@@ -44,11 +44,15 @@ class BaseModel(nn.Module):
             x (torch.Tensor): The input tensor to the model
             profile (bool):  Print the computation time of each layer if True, defaults to False.
             visualize (bool): Save the feature maps of the model if True, defaults to False
+            #--GAN--#
+            self.critics: 
 
         Returns:
             (torch.Tensor): The last output of the model.
         """
         y, dt = [], []  # outputs
+        critics = []
+        c = 0
         for i, m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -57,14 +61,19 @@ class BaseModel(nn.Module):
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
-            
-            if i == 4:
-                print(m)
-                vis(x)
-                exit()
+            if isinstance(m, C2f) and c < 4 and gan:
+                critics.append(self.critics[c](x))
+                c += 1
+
             if visualize:
+                if i < 22:
+                    vis(x, f'vis/fm{i}.png')
+                else:
+                    [vis(k, f'vis/fm{i}{zz}.png') for zz,k in enumerate(x)]
                 LOGGER.info('visualize feature not yet supported')
                 # TODO: feature_visualization(x, m.type, m.i, save_dir=visualize)
+        if gan:
+            return x, critics
         return x
 
     def _profile_one_layer(self, m, x, dt):
@@ -174,7 +183,7 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
+        self.model, self.save, self.critics = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.inplace = self.yaml.get('inplace', True)
 
@@ -183,7 +192,8 @@ class DetectionModel(BaseModel):
         if isinstance(m, (Detect, Segment)):
             s = 256  # 2x min stride
             m.inplace = self.inplace
-            forward = lambda x: self.forward(x)[0] if isinstance(m, Segment) else self.forward(x)
+            forward = lambda x: self.forward(x, gan = False)[0] if isinstance(m, Segment) else self.forward(x, gan = False)
+
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
@@ -194,19 +204,19 @@ class DetectionModel(BaseModel):
             self.info()
             LOGGER.info('')
 
-    def forward(self, x, augment=False, profile=False, visualize=False):
+    def forward(self, x, augment=False, profile=False, visualize=False, gan = False):
         if augment:
-            return self._forward_augment(x)  # augmented inference, None
-        return self._forward_once(x, profile, visualize)  # single-scale inference, train
+            return self._forward_augment(x, gan)  # augmented inference, None
+        return self._forward_once(x, profile, visualize, gan)  # single-scale inference, train
 
-    def _forward_augment(self, x):
+    def _forward_augment(self, x, gan = False):
         img_size = x.shape[-2:]  # height, width
         s = [1, 0.83, 0.67]  # scales
         f = [None, 3, None]  # flips (2-ud, 3-lr)
         y = []  # outputs
         for si, fi in zip(s, f):
             xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-            yi = self._forward_once(xi)[0]  # forward
+            yi = self._forward_once(xi, gan)[0]  # forward
             # cv2.imwrite(f'img_{si}.jpg', 255 * xi[0].cpu().numpy().transpose((1, 2, 0))[:, :, ::-1])  # save
             yi = self._descale_pred(yi, fi, si, img_size)
             y.append(yi)
@@ -284,7 +294,7 @@ class ClassificationModel(BaseModel):
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
+        self.model, self.save, self.critics = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.info()
 
@@ -464,7 +474,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         ch.append(c2)
         # print(m)
     # exit()
-    return nn.Sequential(*layers), sorted(save)
+    critics = []
+    for in_chan, c_scale in zip([32, 64, 128, 256], [4, 8, 16, 32]): # P1 P2 P3 P4 P5
+        critics.append(Critic(in_chan, 1280//c_scale, out_res=40).cuda()) # out_res scale [0.25, 0.5, 0.75, 1, 1.25] -> [n, s, m, l, x] model
+    return nn.Sequential(*layers), sorted(save), critics
 
 
 def guess_model_task(model):

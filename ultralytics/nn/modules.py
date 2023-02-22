@@ -7,7 +7,7 @@ import math
 
 import torch
 import torch.nn as nn
-
+import numpy as np
 from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
 
 
@@ -391,7 +391,6 @@ class Detect(nn.Module):
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
-
     def forward(self, x):
         shape = x[0].shape  # BCHW
         for i in range(self.nl):
@@ -454,3 +453,55 @@ class Classify(nn.Module):
         if isinstance(x, list):
             x = torch.cat(x, 1)
         return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+
+#------------------------------------------------------- GAN ---------------------------------------------#
+class CriticConv(nn.Module):
+    def __init__(self, in_chan, out_chan, ) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1),
+            nn.InstanceNorm2d(out_chan),
+            nn.LeakyReLU(0.2),
+        )
+    def forward(self, x):
+        return self.layer(x)
+  
+class CriticRes(nn.Module):
+    def __init__(self, in_chan, out_chan) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1),
+            nn.InstanceNorm2d(in_chan),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=1, padding=1),
+            nn.InstanceNorm2d(in_chan),
+        )
+        self.act = nn.LeakyReLU(0.2)
+    def forward(self, x):
+        return self.act((x + self.layer(x))/math.sqrt(2))
+
+class Critic(nn.Module):
+    def __init__(self, in_chan, in_res, out_res = 8) -> None:
+        '''
+        IN:
+            in_chan: input channel
+            in_res: input resolution
+            out_res: output resolution
+
+        OUT: (B, 1, out_res, out_res)
+        '''
+        super().__init__()
+        num_layers = int(np.log2(in_res // out_res))
+        # print(num_layers)
+        self.layers = []
+        for i in range(num_layers):
+            self.layers.append(CriticRes(in_chan, in_chan))
+            self.layers.append(CriticConv(in_chan, in_chan*2))
+            in_chan *= 2
+            if i == num_layers-1:
+                self.layers.append(nn.Conv2d(in_chan, 1, 1))
+        if num_layers == 0:
+            self.layers.append(nn.Conv2d(in_chan, 1, 1))
+        self.critic = nn.Sequential(*self.layers)
+    def forward(self, x):
+        return self.critic(x)
