@@ -1,12 +1,12 @@
 from ultralytics import YOLO
 
 # model = YOLO("yolov8n.yaml")  # build a new model from scratch
-model = YOLO("yolov8m.pt")  # load a pretrained model (recommended for training
+model = YOLO("yolov8s.pt")  # load a pretrained model (recommended for training
 model.train(data="aic.yaml", 
             epochs = 500, 
             batch = 8, 
             imgsz = 1280, 
-            device = 'cpu', 
+            device = 'cuda:0', 
             project='AIC', 
             optimizer = 'Adam',
             box = 7.5,

@@ -297,6 +297,7 @@ class BaseTrainer:
                 # Forward
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
+                    print('aa'*500)
                     preds = self.model(batch["img"])
                     self.loss, self.loss_items = self.criterion(preds, batch)
                     if rank != -1:

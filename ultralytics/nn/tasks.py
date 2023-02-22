@@ -15,7 +15,7 @@ from ultralytics.yolo.utils.checks import check_requirements, check_yaml
 from ultralytics.yolo.utils.torch_utils import (fuse_conv_and_bn, initialize_weights, intersect_dicts, make_divisible,
                                                 model_info, scale_img, time_sync)
 
-
+from visualize import vis
 class BaseModel(nn.Module):
     """
     The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family.
@@ -49,13 +49,19 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt = [], []  # outputs
-        for m in self.model:
+        for i, m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
+
+            
+            if i == 4:
+                print(m)
+                vis(x)
+                exit()
             if visualize:
                 LOGGER.info('visualize feature not yet supported')
                 # TODO: feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -456,8 +462,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if i == 0:
             ch = []
         ch.append(c2)
-        print(m)
-    exit()
+        # print(m)
+    # exit()
     return nn.Sequential(*layers), sorted(save)
 
 
