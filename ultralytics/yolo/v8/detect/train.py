@@ -61,7 +61,7 @@ class DetectionTrainer(BaseTrainer):
         if weights:
             model.load(weights)
 
-        return model
+        return model, model.critics
 
     def get_validator(self):
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
@@ -192,7 +192,6 @@ class Loss:
         loss[2] *= self.hyp.dfl  # dfl gain
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
-
 
 def train(cfg=DEFAULT_CFG, use_python=False):
     model = cfg.model or "yolov8n.pt"

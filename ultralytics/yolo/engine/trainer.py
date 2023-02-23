@@ -33,7 +33,7 @@ from ultralytics.yolo.utils.files import get_latest_run, increment_path
 from ultralytics.yolo.utils.torch_utils import (EarlyStopping, ModelEMA, de_parallel, init_seeds, one_cycle,
                                                 select_device, strip_optimizer)
 
-
+import torch.autograd as autograd
 class BaseTrainer:
     """
     BaseTrainer
@@ -123,7 +123,7 @@ class BaseTrainer:
             self.data = check_cls_dataset(self.data)
         else:
             raise FileNotFoundError(emojis(f"Dataset '{self.args.data}' not found ❌"))
-        self.trainset, self.testset = self.get_dataset(self.data)
+        self.trainset, self.testset, self.realset = self.get_dataset(self.data)
         self.ema = None
 
         # Optimization utils init
@@ -143,6 +143,11 @@ class BaseTrainer:
         self.callbacks = defaultdict(list, callbacks.default_callbacks)  # add callbacks
         if RANK in {0, -1}:
             callbacks.add_integration_callbacks(self)
+
+        # --- GAN ---#
+        self.critics = None
+
+
 
     def add_callback(self, event: str, callback):
         """
@@ -231,6 +236,7 @@ class BaseTrainer:
         # dataloaders
         batch_size = self.batch_size // world_size if world_size > 1 else self.batch_size
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=rank, mode="train")
+        self.real_loader = self.get_dataloader(self.realset, batch_size=batch_size, rank=rank, mode="train")
         if rank in {0, -1}:
             self.test_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode="val")
             self.validator = self.get_validator()
@@ -260,6 +266,18 @@ class BaseTrainer:
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+
+
+        #------------------------------------------------------------------------------------------------GAN----------------------------------------------------------------------------------#
+        self.c_lr = 1e-4
+        self.critic_optims = []
+        # self.real_gt = torch.FloatTensor([1])
+        # self.fake_gt = 
+        for ct in self.critics:
+            self.critic_optims.append(torch.optim.Adam(ct.parameters(), lr = self.c_lr))
+        real_pbar = enumerate(self.real_loader)
+
+        #--------------------------------------------------------------------------------------------------Start training---------------------------------------------------------------------#
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
@@ -295,11 +313,25 @@ class BaseTrainer:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
                 # Forward
+                # print(self.critics)
                 with torch.cuda.amp.autocast(self.amp):
-                    batch = self.preprocess_batch(batch)
-                    preds, critics = self.model(batch["img"], gan = True)
+                    try:
+                        batch_real = real_pbar.__next__()[1]
+                    except StopIteration:
+                        real_pbar = enumerate(self.real_loader)
+                        batch_real = real_pbar.__next__()[1]
+                    batch_real = self.preprocess_batch(batch_real)
+                    batch = self.preprocess_batch(batch) # TODO: return real or fake batch
+                    preds, critics_out = self.model(batch["img"], gan = True)
+                    #------------ train GAN with fake-----------#
+                    for i in range(len(self.critics)):
+                        critics_out[i] = critics_out[i].mean()
+                        critics_out[i].backward()
+                        self.critic_optims[i].step()
                     
-                    exit()
+                    #------------ train Yolo -----------#
+                    print(i)
+                    continue
                     self.loss, self.loss_items = self.criterion(preds, batch)
                     if rank != -1:
                         self.loss *= world_size
@@ -397,7 +429,7 @@ class BaseTrainer:
         """
         Get train, val path from data dict if it exists. Returns None if data format is not recognized.
         """
-        return data["train"], data.get("val") or data.get("test")
+        return data["train"], data.get("val"), data.get('real') or data.get("test")
 
     def setup_model(self):
         """
@@ -593,3 +625,25 @@ class BaseTrainer:
         LOGGER.info(f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}) with parameter groups "
                     f"{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias")
         return optimizer
+
+    def calc_gradient_penalty(netD, real_data, fake_data, batch_size, device, LAMBDA =10):
+    #print real_data.size()
+        alpha = torch.rand(batch_size, 1)
+        alpha = alpha.expand(real_data.size())
+        # alpha = alpha.cuda(gpu) if use_cuda else alpha
+        alpha = alpha.to(device)
+
+        interpolates = alpha * real_data + ((1 - alpha) * fake_data)
+
+
+        interpolates = interpolates.to(device)
+        interpolates = autograd.Variable(interpolates, requires_grad=True)
+
+        disc_interpolates = netD(interpolates)
+
+        gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                                grad_outputs=torch.ones(disc_interpolates.size()).to(device),
+                                create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
+        return gradient_penalty

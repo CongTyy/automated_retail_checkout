@@ -215,7 +215,7 @@ def check_det_dataset(dataset, autodownload=True):
     if not path.is_absolute():
         path = (DATASETS_DIR / path).resolve()
         data['path'] = path  # download scripts
-    for k in 'train', 'val', 'test':
+    for k in 'train', 'val', 'test', 'real':
         if data.get(k):  # prepend path
             if isinstance(data[k], str):
                 x = (path / data[k]).resolve()
@@ -226,7 +226,7 @@ def check_det_dataset(dataset, autodownload=True):
                 data[k] = [str((path / x).resolve()) for x in data[k]]
 
     # Parse yaml
-    train, val, test, s = (data.get(x) for x in ('train', 'val', 'test', 'download'))
+    train, val, test, real, s = (data.get(x) for x in ('train', 'val', 'test', 'real', 'download'))
     if val:
         val = [Path(x).resolve() for x in (val if isinstance(val, list) else [val])]  # val path
         if not all(x.exists() for x in val):

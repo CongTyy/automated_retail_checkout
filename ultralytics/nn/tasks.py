@@ -62,7 +62,7 @@ class BaseModel(nn.Module):
             y.append(x if m.i in self.save else None)  # save output
 
             if isinstance(m, C2f) and c < 4 and gan:
-                critics.append(self.critics[c](x))
+                critics.append(self.critics[c](x.detach()))
                 c += 1
 
             if visualize:

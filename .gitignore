@@ -1,10 +1,10 @@
-AIC/
-datasets/
-rawdataset/
-runs/
-weights/
+/AIC/
+/datasets/
+/rawdataset/
+/runs/
+/weights/
 AIC23_Track4_Automated_Checkout.zip
 yolov8*.pt
 todo.md
-vis/
+/vis/
 ./my_test.py
