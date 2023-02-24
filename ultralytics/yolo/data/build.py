@@ -100,7 +100,8 @@ def build_dataloader(cfg, batch_size, img_path, stride=32, label_path=None, rank
                   pin_memory=PIN_MEMORY,
                   collate_fn=getattr(dataset, "collate_fn", None),
                   worker_init_fn=seed_worker,
-                  generator=generator), dataset
+                  generator=generator,
+                  drop_last=True), dataset
 
 
 # build classification

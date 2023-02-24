@@ -21,7 +21,7 @@ class BaseModel(nn.Module):
     The BaseModel class serves as a base class for all the models in the Ultralytics YOLO family.
     """
 
-    def forward(self, x, profile=False, visualize=False, gan = False):
+    def forward(self, x, profile=False, visualize=False, gan = False, train_G = False):
         """
         Forward pass of the model on a single scale.
         Wrapper for `_forward_once` method.
@@ -34,9 +34,9 @@ class BaseModel(nn.Module):
         Returns:
             (torch.Tensor): The output of the network.
         """
-        return self._forward_once(x, profile, visualize, gan = False)
+        return self._forward_once(x, profile, visualize, gan = False, train_G = False)
 
-    def _forward_once(self, x, profile=False, visualize=False, gan = False):
+    def _forward_once(self, x, profile=False, visualize=False, gan = False, train_G = False):
         """
         Perform a forward pass through the network.
 
@@ -53,6 +53,7 @@ class BaseModel(nn.Module):
         y, dt = [], []  # outputs
         critics = []
         c = 0
+        yolo_features = []
         for i, m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -62,7 +63,12 @@ class BaseModel(nn.Module):
             y.append(x if m.i in self.save else None)  # save output
 
             if isinstance(m, C2f) and c < 4 and gan:
-                critics.append(self.critics[c](x.detach()))
+                if not train_G:
+                    critics.append(self.critics[c](x.detach()))
+                    yolo_features.append(x.detach())
+                else: 
+                    critics.append(self.critics[c](x))
+                    yolo_features.append(x.detach())
                 c += 1
 
             if visualize:
@@ -73,7 +79,7 @@ class BaseModel(nn.Module):
                 LOGGER.info('visualize feature not yet supported')
                 # TODO: feature_visualization(x, m.type, m.i, save_dir=visualize)
         if gan:
-            return x, critics
+            return x, critics, yolo_features
         return x
 
     def _profile_one_layer(self, m, x, dt):
@@ -204,19 +210,19 @@ class DetectionModel(BaseModel):
             self.info()
             LOGGER.info('')
 
-    def forward(self, x, augment=False, profile=False, visualize=False, gan = False):
+    def forward(self, x, augment=False, profile=False, visualize=False, gan = False, train_G = False):
         if augment:
-            return self._forward_augment(x, gan)  # augmented inference, None
-        return self._forward_once(x, profile, visualize, gan)  # single-scale inference, train
+            return self._forward_augment(x, gan, train_G)  # augmented inference, None
+        return self._forward_once(x, profile, visualize, gan, train_G)  # single-scale inference, train
 
-    def _forward_augment(self, x, gan = False):
+    def _forward_augment(self, x, gan = False, train_G=False):
         img_size = x.shape[-2:]  # height, width
         s = [1, 0.83, 0.67]  # scales
         f = [None, 3, None]  # flips (2-ud, 3-lr)
         y = []  # outputs
         for si, fi in zip(s, f):
             xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-            yi = self._forward_once(xi, gan)[0]  # forward
+            yi = self._forward_once(xi, gan, train_G)[0]  # forward
             # cv2.imwrite(f'img_{si}.jpg', 255 * xi[0].cpu().numpy().transpose((1, 2, 0))[:, :, ::-1])  # save
             yi = self._descale_pred(yi, fi, si, img_size)
             y.append(yi)

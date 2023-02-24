@@ -271,11 +271,10 @@ class BaseTrainer:
         #------------------------------------------------------------------------------------------------GAN----------------------------------------------------------------------------------#
         self.c_lr = 1e-4
         self.critic_optims = []
-        # self.real_gt = torch.FloatTensor([1])
-        # self.fake_gt = 
         for ct in self.critics:
             self.critic_optims.append(torch.optim.Adam(ct.parameters(), lr = self.c_lr))
         real_pbar = enumerate(self.real_loader)
+        criterionGAN = GANLoss(gan_mode='lsgan')
 
         #--------------------------------------------------------------------------------------------------Start training---------------------------------------------------------------------#
         for epoch in range(self.start_epoch, self.epochs):
@@ -312,31 +311,93 @@ class BaseTrainer:
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
+                gan = True
+                wgan = False
+                if gan:
                 # Forward
-                # print(self.critics)
-                with torch.cuda.amp.autocast(self.amp):
-                    try:
-                        batch_real = real_pbar.__next__()[1]
-                    except StopIteration:
-                        real_pbar = enumerate(self.real_loader)
-                        batch_real = real_pbar.__next__()[1]
-                    batch_real = self.preprocess_batch(batch_real)
-                    batch = self.preprocess_batch(batch) # TODO: return real or fake batch
-                    preds, critics_out = self.model(batch["img"], gan = True)
-                    #------------ train GAN with fake-----------#
-                    for i in range(len(self.critics)):
-                        critics_out[i] = critics_out[i].mean()
-                        critics_out[i].backward()
-                        self.critic_optims[i].step()
-                    
-                    #------------ train Yolo -----------#
-                    print(i)
-                    continue
-                    self.loss, self.loss_items = self.criterion(preds, batch)
-                    if rank != -1:
-                        self.loss *= world_size
-                    self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
-                        else self.loss_items
+                    with torch.cuda.amp.autocast(self.amp):
+                        try:
+                            batch_real = real_pbar.__next__()[1]
+                        except StopIteration:
+                            real_pbar = enumerate(self.real_loader)
+                            batch_real = real_pbar.__next__()[1]
+                        batch_real = self.preprocess_batch(batch_real)
+                        batch = self.preprocess_batch(batch)
+            
+
+
+
+                        #------------ train GAN with fake-----------#
+                        if wgan:
+                            _, cr_out_fake, yf_fake = self.model(batch["img"], gan = True) # yf: yolo features
+                            _, cr_out_real, yf_real = self.model(batch_real["img"], gan = True)
+
+                            cr_losses = 0
+                            for cr in range(len(self.critics)):
+                                gradient_penalty = self.calc_gradient_penalty(self.critics[cr], yf_real[cr], yf_fake[cr], batch_size=2,  device=self.device, LAMBDA=10)
+                                cr_out_fake[cr] = cr_out_fake[cr].mean()
+                                cr_out_real[cr] = cr_out_real[cr].mean()
+                                cr_loss = cr_out_fake[cr] - cr_out_real[cr] + gradient_penalty
+                                cr_losses += cr_loss.item()
+                                self.critic_optims[cr].zero_grad()
+                                cr_loss.backward()
+                                self.critic_optims[cr].step()
+                        
+                        else:
+                            _, cr_out_fake, yf_fake = self.model(batch["img"], gan = True) # yf: yolo features
+                            _, cr_out_real, yf_real = self.model(batch_real["img"], gan = True)
+
+                            d_losses = 0
+                            for cr in range(len(self.critics)):
+                                d_loss_real = criterionGAN(cr_out_real[cr], True)
+                                d_loss_fake = criterionGAN(cr_out_fake[cr], False)
+                                d_loss = 0.5*(d_loss_fake + d_loss_real)
+                                d_losses += d_loss.item()
+
+                                self.critic_optims[cr].zero_grad()
+                                d_loss.backward()
+                                self.critic_optims[cr].step()
+                            
+                            cr_losses = d_losses # for print
+
+                        #------------ train Yolo -----------#
+                        preds, cr_out_fake, _ = self.model(batch["img"], gan = True, train_G = True) # yf: yolo features
+                        cr_fake_all_loss = 0
+                        
+                        if wgan:
+                            alpha_critic = 10
+                            for cr in range(len(self.critics)):
+                                cr_fake_all_loss -= cr_out_fake[cr].detach().mean()
+
+                            self.loss, self.loss_items = self.criterion(preds, batch) # YOLO loss
+                            self.loss = self.loss + alpha_critic*cr_fake_all_loss
+                            self.loss_items = self.loss_items + alpha_critic*cr_fake_all_loss.item()
+                        else:
+                            alpha_critic = 10
+                            for cr in range(len(self.critics)):
+                                cr_fake_all_loss += criterionGAN(cr_out_fake[cr], True)
+
+                            self.loss, self.loss_items = self.criterion(preds, batch) # YOLO loss
+                            self.loss = self.loss + alpha_critic*cr_fake_all_loss
+                            self.loss_items = self.loss_items + alpha_critic*cr_fake_all_loss.item()
+
+                        if rank != -1:
+                            self.loss *= world_size
+                        self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
+                            else self.loss_items
+
+
+                # ---------------- only YOLO ---------------------#
+                else:
+                    with torch.cuda.amp.autocast(self.amp):
+                        batch = self.preprocess_batch(batch)
+                        preds = self.model(batch["img"])
+                        self.loss, self.loss_items = self.criterion(preds, batch)
+                        if rank != -1:
+                            self.loss *= world_size
+                        self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
+                            else self.loss_items
+                        cr_losses = 0
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -352,8 +413,8 @@ class BaseTrainer:
                 losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
                 if rank in {-1, 0}:
                     pbar.set_description(
-                        ('%11s' * 2 + '%11.4g' * (2 + loss_len)) %
-                        (f'{epoch + 1}/{self.epochs}', mem, *losses, batch["cls"].shape[0], batch["img"].shape[-1]))
+                        ('%11s' * 2 + '%11.4g' * (2 + loss_len) + '%11.4g') %
+                        (f'{epoch + 1}/{self.epochs}', mem, *losses, batch["cls"].shape[0], batch["img"].shape[-1], cr_losses))
                     self.run_callbacks('on_batch_end')
                     if self.args.plots and ni in self.plot_idx:
                         self.plot_training_samples(batch, ni)
@@ -626,12 +687,13 @@ class BaseTrainer:
                     f"{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias")
         return optimizer
 
+    @staticmethod
     def calc_gradient_penalty(netD, real_data, fake_data, batch_size, device, LAMBDA =10):
-    #print real_data.size()
-        alpha = torch.rand(batch_size, 1)
-        alpha = alpha.expand(real_data.size())
-        # alpha = alpha.cuda(gpu) if use_cuda else alpha
-        alpha = alpha.to(device)
+        
+        # real_data = real_data.permute(0, 2, 3, 1)
+
+        alpha = torch.rand_like(real_data).to(device)
+
 
         interpolates = alpha * real_data + ((1 - alpha) * fake_data)
 
@@ -647,3 +709,46 @@ class BaseTrainer:
 
         gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
         return gradient_penalty
+
+class GANLoss(nn.Module):
+    """Define different GAN objectives.
+    The GANLoss class abstracts away the need to create the target label tensor
+    that has the same size as the input.
+    """
+
+    def __init__(self, gan_mode='lsgan', target_real_label=1.0, target_fake_label=0.0):
+        """ Initialize the GANLoss class.
+        Parameters:
+            gan_mode (str) - - the type of GAN objective. It currently supports vanilla, lsgan, and wgangp.
+            target_real_label (bool) - - label for a real image
+            target_fake_label (bool) - - label of a fake image
+        Note: Do not use sigmoid as the last layer of Discriminator.
+        LSGAN needs no sigmoid. vanilla GANs will handle it with BCEWithLogitsLoss.
+        """
+        super(GANLoss, self).__init__()
+        self.register_buffer('real_label', torch.tensor(target_real_label))
+        self.register_buffer('fake_label', torch.tensor(target_fake_label))
+        self.gan_mode = gan_mode
+        if gan_mode == 'lsgan':
+            self.loss = nn.MSELoss()
+        elif gan_mode == 'vanilla':
+            self.loss = nn.BCEWithLogitsLoss()
+        else:
+            raise NotImplementedError('gan mode %s not implemented' % gan_mode)
+
+    def forward(self, prediction, target_is_real):
+        """Calculate loss given Discriminator's output and grount truth labels.
+        Parameters:
+            prediction (tensor) - - tpyically the prediction output from a discriminator
+            target_is_real (bool) - - if the ground truth label is for real images or fake images
+        Returns:
+            the calculated loss.
+        """
+        if target_is_real:
+            target_tensor = self.real_label
+        else:
+            target_tensor = self.fake_label
+        target_tensor = target_tensor.expand_as(prediction).to(prediction.device)
+        
+        loss = self.loss(prediction, target_tensor)
+        return loss

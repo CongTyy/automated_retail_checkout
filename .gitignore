@@ -8,6 +8,8 @@ yolov8*.pt
 todo.md
 /vis/
 ./my_test.py
-/__pycache__/
-/.vscode/
-
+__pycache__/
+/.vscode/*
+AIC22-TEAM55-TRACK4/
+TEST_GAN/
+data_train_yolor.zip
