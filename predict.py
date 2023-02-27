@@ -2,7 +2,7 @@ from ultralytics import YOLO
 from PIL import Image
 import cv2
 
-model = YOLO("AIC/bs8_ep500_1280_8s/weights/best.pt")
+model = YOLO("AIC/train12/weights/best.pt")  # load a pretrained model (recommended for training)
 # print(model)
 # exit()
 # from ndarray

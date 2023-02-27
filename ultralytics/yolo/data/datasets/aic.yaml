@@ -2,9 +2,9 @@
 # Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
 path: ../automated_retail_checkout/datasets  # dataset root dir
 train: train_3  # train images (relative to 'path') 128 images
-val: val_3 # val images (relative to 'path') 128 images
-test: val_3  # test images (optional)
-real: val_3
+val: real_3 #val_3 # val images (relative to 'path') 128 images
+test: real_3  # test images (optional)
+real: real_3
 
 # Classes
 names:

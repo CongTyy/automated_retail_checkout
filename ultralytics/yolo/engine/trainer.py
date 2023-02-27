@@ -373,7 +373,7 @@ class BaseTrainer:
                             self.loss = self.loss + alpha_critic*cr_fake_all_loss
                             self.loss_items = self.loss_items + alpha_critic*cr_fake_all_loss.item()
                         else:
-                            alpha_critic = 10
+                            alpha_critic = 5
                             for cr in range(len(self.critics)):
                                 cr_fake_all_loss += criterionGAN(cr_out_fake[cr], True)
 
