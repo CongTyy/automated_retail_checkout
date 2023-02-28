@@ -51,8 +51,6 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt = [], []  # outputs
-        critics = []
-        c = 0
         yolo_features = []
         for i, m in enumerate(self.model):
             if m.f != -1:  # if not from previous layer
@@ -62,14 +60,11 @@ class BaseModel(nn.Module):
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
-            if isinstance(m, C2f) and c < 4 and gan:
+            if isinstance(m, C2f) and gan and (i == 15 or i == 18 or i == 21): # 3 detect HEAD
                 if not train_G:
-                    critics.append(self.critics[c](x.detach()))
                     yolo_features.append(x.detach())
                 else: 
-                    critics.append(self.critics[c](x))
-                    yolo_features.append(x.detach())
-                c += 1
+                    yolo_features.append(x)
 
             if visualize:
                 if i < 22:
@@ -79,7 +74,7 @@ class BaseModel(nn.Module):
                 LOGGER.info('visualize feature not yet supported')
                 # TODO: feature_visualization(x, m.type, m.i, save_dir=visualize)
         if gan:
-            return x, critics, yolo_features
+            return x, yolo_features
         return x
 
     def _profile_one_layer(self, m, x, dt):
@@ -189,7 +184,7 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.save, self.critics = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.inplace = self.yaml.get('inplace', True)
 
@@ -300,7 +295,7 @@ class ClassificationModel(BaseModel):
         if nc and nc != self.yaml['nc']:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.save, self.critics = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.info()
 
@@ -478,12 +473,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         if i == 0:
             ch = []
         ch.append(c2)
-        # print(m)
-    # exit()
-    critics = []
-    for in_chan, c_scale in zip([32, 64, 128, 256], [4, 8, 16, 32]): # P1 P2 P3 P4 P5
-        critics.append(Critic(in_chan, 1280//c_scale, out_res=40).cuda()) # out_res scale [0.25, 0.5, 0.75, 1, 1.25] -> [n, s, m, l, x] model
-    return nn.Sequential(*layers), sorted(save), critics
+
+    return nn.Sequential(*layers), sorted(save)
 
 
 def guess_model_task(model):

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
-
+from ultralytics.nn.spectral_norm import spectral_norm as SpectralNorm
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     # Pad to 'same' shape outputs
@@ -456,12 +456,13 @@ class Classify(nn.Module):
 
 #------------------------------------------------------- GAN ---------------------------------------------#
 class CriticConv(nn.Module):
-    def __init__(self, in_chan, out_chan, ) -> None:
+    def __init__(self, in_chan, out_chan) -> None:
         super().__init__()
         self.layer = nn.Sequential(
-            nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1),
-            nn.InstanceNorm2d(out_chan),
-            nn.LeakyReLU(0.2),
+            SpectralNorm(nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1)),
+            nn.LeakyReLU(0.01, inplace=True),
+            SpectralNorm(nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1)),
+            nn.LeakyReLU(0.01, inplace=True),
         )
     def forward(self, x):
         return self.layer(x)
@@ -470,38 +471,64 @@ class CriticRes(nn.Module):
     def __init__(self, in_chan, out_chan) -> None:
         super().__init__()
         self.layer = nn.Sequential(
-            nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(in_chan),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=1, padding=1),
-            nn.InstanceNorm2d(in_chan),
+            SpectralNorm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1)),
+            nn.LeakyReLU(0.01, inplace=True),
+            SpectralNorm(nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=1, padding=1)),
+
         )
-        self.act = nn.LeakyReLU(0.2)
+        self.act = nn.LeakyReLU(0.01, inplace=True)
     def forward(self, x):
         return self.act((x + self.layer(x))/math.sqrt(2))
 
+# class Critic(nn.Module):
+#     def __init__(self, in_chan, in_res, out_res = 8) -> None:
+#         '''
+#         IN:
+#             in_chan: input channel
+#             in_res: input resolution
+#             out_res: output resolution
+
+#         OUT: (B, 1, out_res, out_res)
+#         '''
+#         super().__init__()
+#         num_layers = int(np.log2(in_res // out_res))
+#         # print(num_layers)
+#         self.layers = []
+#         for i in range(num_layers):
+#             self.layers.append(CriticRes(in_chan, in_chan))
+#             self.layers.append(CriticConv(in_chan, in_chan*2))
+#             in_chan *= 2
+#             if i == num_layers-1:
+#                 self.layers.append(nn.Conv2d(in_chan, 1, 1))
+#         if num_layers == 0:
+#             self.layers.append(nn.Conv2d(in_chan, 1, 1))
+#         self.critic = nn.Sequential(*self.layers)
+#     def forward(self, x):
+#         return self.critic(x)
+
 class Critic(nn.Module):
-    def __init__(self, in_chan, in_res, out_res = 8) -> None:
+    def __init__(self, in_chan, combine_res = 40) -> None:
         '''
         IN:
             in_chan: input channel
-            in_res: input resolution
-            out_res: output resolution
+            num_layer: stack layer: ResBlock -> Block -> ..
 
-        OUT: (B, 1, out_res, out_res)
+        OUT: (B, 1, W, H)
         '''
         super().__init__()
-        num_layers = int(np.log2(in_res // out_res))
-        # print(num_layers)
-        self.layers = []
-        for i in range(num_layers):
-            self.layers.append(CriticRes(in_chan, in_chan))
-            self.layers.append(CriticConv(in_chan, in_chan*2))
-            in_chan *= 2
-            if i == num_layers-1:
-                self.layers.append(nn.Conv2d(in_chan, 1, 1))
-        if num_layers == 0:
-            self.layers.append(nn.Conv2d(in_chan, 1, 1))
-        self.critic = nn.Sequential(*self.layers)
+        self.combine_res = combine_res
+        self.layers = nn.Sequential(
+            CriticConv(in_chan, 256),
+            CriticRes(256, 256),
+            CriticRes(256, 256),
+            CriticConv(256, 256*2),
+            nn.Conv2d(256*2, 1, 1)
+        )
+
+        
     def forward(self, x):
-        return self.critic(x)
+        '''
+        [64 x 160 x 160] - [128 x 80 x 80] - [256 x 40 x 40]
+        '''
+        return self.layers(x)
+

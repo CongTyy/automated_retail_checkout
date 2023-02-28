@@ -1,9 +1,10 @@
 from ultralytics import YOLO
 
 # model = YOLO("yolov8n.yaml")  # build a new model from scratch
-model = YOLO("yolov8n.pt")  # load a pretrained model (recommended for training
+# model = YOLO("yolov8n.pt")  # load a pretrained model (recommended for training
+model = YOLO('AIC/wwGAN/weights/best.pt')
 model.train(data="aic.yaml", 
-            epochs = 200, 
+            epochs = 100, 
             batch = 16, 
             imgsz = 1280, 
             device = 'cuda:1', 
@@ -16,5 +17,5 @@ model.train(data="aic.yaml",
             fliplr = 0.5,
             mosaic = 0.5,
             degrees = 5,
-            patience = 50,
+            patience = 100,
             )  # train the model

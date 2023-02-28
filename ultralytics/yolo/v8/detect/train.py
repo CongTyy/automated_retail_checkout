@@ -61,7 +61,7 @@ class DetectionTrainer(BaseTrainer):
         if weights:
             model.load(weights)
 
-        return model, model.critics
+        return model
 
     def get_validator(self):
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
