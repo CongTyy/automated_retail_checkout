@@ -102,11 +102,11 @@ class BasePredictor:
         self.callbacks = defaultdict(list, callbacks.default_callbacks)  # add callbacks
 
         # Set up Tracking
-        self.track_thresh = 0.6    # tracking confidence threshold 0.6     
-        self.track_buffer = 60     # the frames for keep lost tracks 60 
+        self.track_thresh = 0.5    # tracking confidence threshold 0.6     
+        self.track_buffer = 30     # the frames for keep lost tracks 60 
         self.match_thresh = 0.8    # matching threshold for tracking 0.8
-        self.frame_rate =    60      # FPS
-        self.aspect_ratio_thresh = 1.5
+        self.frame_rate =  60      # FPS
+        self.aspect_ratio_thresh = 1.6
         self.min_box_area = 10
         self.mot20_check = False
         callbacks.add_integration_callbacks(self)
@@ -150,7 +150,9 @@ class BasePredictor:
         self.source_type = self.dataset.source_type
         self.vid_path, self.vid_writer = [None] * self.dataset.bs, [None] * self.dataset.bs
 
-        
+
+
+
 
 
     def stream_inference(self, source=None, model=None):
@@ -174,6 +176,8 @@ class BasePredictor:
 
         self.seen, self.windows, self.dt, self.batch = 0, [], (ops.Profile(), ops.Profile(), ops.Profile()), None
         self.df =  pd.DataFrame(columns=['video_id','class_id', 'bbox', 'frame'])
+        #setup tracker
+        self.tracker = BYTETracker(self.track_thresh, self.track_buffer, self.match_thresh, self.mot20_check, self.frame_rate)
 
         for batch in self.dataset:
             self.run_callbacks("on_predict_batch_start")
@@ -196,34 +200,55 @@ class BasePredictor:
                 p, im0 = (path[i], im0s[i]) if self.source_type.webcam or self.source_type.from_img else (path, im0s)
                 p = Path(p)
                 self.annotator = self.get_annotator(im0)
+                obj_bbox = []
+                tracked_tlwhs = []
+                tracked_tlbrs = []
+                tracked_ids = []
+                tracked_scores = []
                 if True:
                     det = self.results[i].boxes  # TODO: make boxes inherit from tensors
                     if len(det) == 0:
+                        # save full video
+                        # if self.args.save:
+                        #     self.annotator.box_label([])
+                        #     self.save_preds(vid_cap, i, str(self.save_dir / p.name))
                         continue
-                    # write
+    
+                    height, width,_ = im0.shape #new
                     for d in reversed(det):
                         imc = im0.copy()
-                        height, width, _ = im0.shape #new
                         cls, conf = d.cls.squeeze(), d.conf.squeeze()
-                        crop, (x1, y1, x2, y2) = crop_vit(d.xyxy, imc, BGR=True)
-                        
+                        crop, (x1, y1, x2, y2) = crop_vit(d.xyxy, imc, BGR=False)
                         score, label_cls = inference(crop)
+                        # set_thresh and None class
+                        if label_cls == 'None' or score < 5: # TODO: before or after TRACK?
+                            continue
 
+                        # double check 
+                        # if cls and label_cls same ==> track
+
+                        obj_bbox.append(np.array([x1, y1, x2, y2,conf.cpu().numpy()]))
+                        input_tracker = np.array(obj_bbox) 
                         #tracker
-                        tracked_objects = self.tracker.update(np.array(d.xyxy), [height, width], (height, width))
-
-                        tracked_tlwhs = []
-                        tracked_ids = []
-                        tracked_scores = []
+                        tracked_objects = self.tracker.update(input_tracker,[height,width], (height, width))
+                    
                         for t in tracked_objects:
                             tlwh = t.tlwh
+                            tlbr = t.tlbr
                             tid = t.track_id
                             vertical = tlwh[2] / tlwh[3] > self.aspect_ratio_thresh
                             if tlwh[2] * tlwh[3] > self.min_box_area and not vertical:
                                 tracked_tlwhs.append(tlwh)
+                                tracked_tlbrs.append(tlbr)
                                 tracked_ids.append(tid)
                                 tracked_scores.append(t.score)
+                            
+                    
+                        if self.args.save:
+                            self.annotator.box_label(tracked_tlbrs,  f'{label_cls} {score:.2f}', color=(255, 255, 0))
 
+                if self.args.save:
+                    self.save_preds(vid_cap, i, str(self.save_dir / p.name))
 
                         #TODO: 1. add tracking
                         #      2. write csv/txt + postprocess
@@ -238,11 +263,6 @@ class BasePredictor:
                         #         'score_cls' : score
                         #     },ignore_index=True)
                         #write video
-
-                if self.args.save:
-                    # self.annotator.box_label(d.xyxy.squeeze(),  f'{label_cls} {score:.2f}', color=(255, 0, 255))
-                    self.annotator.box_label(tracked_tlwhs.squeeze(),  f'{label_cls} {score:.2f}', color=(255, 0, 255))
-                    self.save_preds(vid_cap, i, str(self.save_dir / p.name))
 
             self.run_callbacks("on_predict_batch_end")
             yield from self.results
@@ -263,6 +283,8 @@ class BasePredictor:
 
         self.run_callbacks("on_predict_end")
 
+
+
     def setup_model(self, model):
         device = select_device(self.args.device)
         model = model or self.args.model
@@ -270,7 +292,8 @@ class BasePredictor:
         self.model = AutoBackend(model, device=device, dnn=self.args.dnn, data=self.args.data, fp16=self.args.half)
         self.device = device
         self.model.eval()
-        self.tracker = BYTETracker(self.track_thresh, self.track_buffer, self.match_thresh, self.mot20_check, self.frame_rate)
+        
+        
 
     def show(self, p):
         im0 = self.annotator.result()

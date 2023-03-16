@@ -519,7 +519,7 @@ class Critic(nn.Module):
         self.combine_res = combine_res
         self.layers = nn.Sequential(
             CriticConv(in_chan, 256),
-            CriticRes(256, 256),
+            CriticConv(256, 256),
             CriticRes(256, 256),
             nn.Conv2d(256, 1, 1)
         )
