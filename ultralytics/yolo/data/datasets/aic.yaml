@@ -2,7 +2,7 @@
 # Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
 path: ../ultralytics/datasets  # dataset root dir
 train: train_3  # train images (relative to 'path') 128 images
-val: real_3 #val_3 # val images (relative to 'path') 128 images
+val: real_3 #real_3 #val_3 # val images (relative to 'path') 128 images
 test: real_3  # test images (optional)
 real: real_3
 

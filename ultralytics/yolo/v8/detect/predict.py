@@ -6,8 +6,7 @@ import torch
 from ultralytics.yolo.engine.predictor import BasePredictor
 from ultralytics.yolo.engine.results import Results
 from ultralytics.yolo.utils import DEFAULT_CFG, ROOT, ops
-from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box
-
+from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box, crop_vit
 
 class DetectionPredictor(BasePredictor):
 
@@ -63,8 +62,7 @@ class DetectionPredictor(BasePredictor):
         for d in reversed(det):
             cls, conf = d.cls.squeeze(), d.conf.squeeze()
             if self.args.save_txt:  # Write to file
-                line = (cls, *(d.xywhn.view(-1).tolist()), conf) \
-                    if self.args.save_conf else (cls, *(d.xywhn.view(-1).tolist()))  # label format
+                line = (cls, *(d.xywhn.view(-1).tolist()), conf) if self.args.save_conf else (cls, *(d.xywhn.view(-1).tolist()))  # label format
                 with open(f'{self.txt_path}.txt', 'a') as f:
                     f.write(('%g ' * len(line)).rstrip() % line + '\n')
             if self.args.save or self.args.save_crop or self.args.show:  # Add bbox to image
@@ -77,6 +75,7 @@ class DetectionPredictor(BasePredictor):
                              imc,
                              file=self.save_dir / 'crops' / self.model.model.names[c] / f'{self.data_path.stem}.jpg',
                              BGR=True)
+
 
         return log_string
 

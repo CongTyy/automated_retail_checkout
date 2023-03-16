@@ -39,8 +39,15 @@ from ultralytics.yolo.utils import DEFAULT_CFG, LOGGER, SETTINGS, callbacks, col
 from ultralytics.yolo.utils.checks import check_imgsz, check_imshow
 from ultralytics.yolo.utils.files import increment_path
 from ultralytics.yolo.utils.torch_utils import select_device, smart_inference_mode
+from ultralytics.yolo.utils.plotting import Annotator, colors, save_one_box, crop_vit
+from vit import inference
 
 
+import numpy as np
+
+from tracker.byte_tracker import BYTETracker #new
+
+import pandas as pd
 class BasePredictor:
     """
     BasePredictor
@@ -91,7 +98,17 @@ class BasePredictor:
         self.annotator = None
         self.data_path = None
         self.source_type = None
+
         self.callbacks = defaultdict(list, callbacks.default_callbacks)  # add callbacks
+
+        # Set up Tracking
+        self.track_thresh = 0.6    # tracking confidence threshold 0.6     
+        self.track_buffer = 60     # the frames for keep lost tracks 60 
+        self.match_thresh = 0.8    # matching threshold for tracking 0.8
+        self.frame_rate =    60      # FPS
+        self.aspect_ratio_thresh = 1.5
+        self.min_box_area = 10
+        self.mot20_check = False
         callbacks.add_integration_callbacks(self)
 
     def preprocess(self, img):
@@ -133,6 +150,9 @@ class BasePredictor:
         self.source_type = self.dataset.source_type
         self.vid_path, self.vid_writer = [None] * self.dataset.bs, [None] * self.dataset.bs
 
+        
+
+
     def stream_inference(self, source=None, model=None):
         self.run_callbacks("on_predict_start")
         if self.args.verbose:
@@ -153,6 +173,8 @@ class BasePredictor:
             self.done_warmup = True
 
         self.seen, self.windows, self.dt, self.batch = 0, [], (ops.Profile(), ops.Profile(), ops.Profile()), None
+        self.df =  pd.DataFrame(columns=['video_id','class_id', 'bbox', 'frame'])
+
         for batch in self.dataset:
             self.run_callbacks("on_predict_batch_start")
             self.batch = batch
@@ -173,14 +195,53 @@ class BasePredictor:
             for i in range(len(im)):
                 p, im0 = (path[i], im0s[i]) if self.source_type.webcam or self.source_type.from_img else (path, im0s)
                 p = Path(p)
+                self.annotator = self.get_annotator(im0)
+                if True:
+                    det = self.results[i].boxes  # TODO: make boxes inherit from tensors
+                    if len(det) == 0:
+                        continue
+                    # write
+                    for d in reversed(det):
+                        imc = im0.copy()
+                        height, width, _ = im0.shape #new
+                        cls, conf = d.cls.squeeze(), d.conf.squeeze()
+                        crop, (x1, y1, x2, y2) = crop_vit(d.xyxy, imc, BGR=True)
+                        
+                        score, label_cls = inference(crop)
 
-                if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                    s += self.write_results(i, self.results, (p, im, im0))
+                        #tracker
+                        tracked_objects = self.tracker.update(np.array(d.xyxy), [height, width], (height, width))
 
-                if self.args.show:
-                    self.show(p)
+                        tracked_tlwhs = []
+                        tracked_ids = []
+                        tracked_scores = []
+                        for t in tracked_objects:
+                            tlwh = t.tlwh
+                            tid = t.track_id
+                            vertical = tlwh[2] / tlwh[3] > self.aspect_ratio_thresh
+                            if tlwh[2] * tlwh[3] > self.min_box_area and not vertical:
+                                tracked_tlwhs.append(tlwh)
+                                tracked_ids.append(tid)
+                                tracked_scores.append(t.score)
+
+
+                        #TODO: 1. add tracking
+                        #      2. write csv/txt + postprocess
+
+
+                        # if (label_cls!='None'):
+                        #     df = df.append({
+                        #         'video_id': p.stem,
+                        #         'frame':self.dataset.frame,
+                        #         'bbox':[x1, y1, x2, y2],
+                        #         'class_id':label_cls,
+                        #         'score_cls' : score
+                        #     },ignore_index=True)
+                        #write video
 
                 if self.args.save:
+                    # self.annotator.box_label(d.xyxy.squeeze(),  f'{label_cls} {score:.2f}', color=(255, 0, 255))
+                    self.annotator.box_label(tracked_tlwhs.squeeze(),  f'{label_cls} {score:.2f}', color=(255, 0, 255))
                     self.save_preds(vid_cap, i, str(self.save_dir / p.name))
 
             self.run_callbacks("on_predict_batch_end")
@@ -209,6 +270,7 @@ class BasePredictor:
         self.model = AutoBackend(model, device=device, dnn=self.args.dnn, data=self.args.data, fp16=self.args.half)
         self.device = device
         self.model.eval()
+        self.tracker = BYTETracker(self.track_thresh, self.track_buffer, self.match_thresh, self.mot20_check, self.frame_rate)
 
     def show(self, p):
         im0 = self.annotator.result()

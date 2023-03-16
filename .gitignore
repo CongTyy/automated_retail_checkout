@@ -15,3 +15,8 @@ TEST_GAN/
 data_train_yolor.zip
 d.zip
 ./my_test.ipynb
+/ViT/
+/backup/
+crop.png
+/ultralytics/yolo/engine/ViT/
+/tray_detector/

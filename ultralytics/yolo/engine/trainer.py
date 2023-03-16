@@ -281,6 +281,7 @@ class BaseTrainer:
         combine_res = 40
         writer = SummaryWriter(log_dir="./runs/gan", )
         step_gan = 0
+        c_iters = 5
         #--------------------------------------------------------------------------------------------------Start training---------------------------------------------------------------------#
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
@@ -318,6 +319,8 @@ class BaseTrainer:
 
                 gan = True
                 wgan = True
+                dcgan = False
+                cwgan = False # TODO
                 if gan:
                 # Forward
                     with torch.cuda.amp.autocast(self.amp):
@@ -334,11 +337,44 @@ class BaseTrainer:
 
                         #------------ train GAN with fake-----------#
                         if wgan:
-                            # feed YOLO -> features real/fake
+                            for _ in range(c_iters):
+                                # feed YOLO -> features real/fake
+                                _, yf_fakes = self.model(batch["img"], gan = True) # yf: yolo features
+                                _, yf_reals = self.model(batch_real["img"], gan = True)
+
+                                # combine features real/fake
+                                yf_real = []
+                                yf_fake = []
+                                for f_r, f_f in zip(yf_reals, yf_fakes): # [16 64 160 160] [16 128 80 80] [16 256 40 40]  
+                                    kernel_size = f_r.size(3)//combine_res
+                                    yf_real.append(integrating(f_r, kernel_size))
+                                    yf_fake.append(integrating(f_f, kernel_size))
+
+                                
+                                yf_real = torch.concat(yf_real, dim = 1) # 1792 x 40 x 40
+                                yf_fake = torch.concat(yf_fake, dim = 1)
+
+                                # feed Critic Model & cal loss D
+                                critic_model.zero_grad()
+                                c_real = critic_model(yf_real)
+                                c_real = c_real.mean()
+
+                                c_fake = critic_model(yf_fake)
+                                c_fake = c_fake.mean()
+
+                                gradient_penalty = self.calc_gradient_penalty(critic_model, yf_real, yf_fake,  device=self.device, LAMBDA=10)
+
+                                c_total_loss = c_fake - c_real + gradient_penalty
+                                c_total_loss.backward()
+                                critic_optim.step()
+                                writer.add_scalar("c_total_loss", c_total_loss, step_gan)
+                                writer.add_scalar("c_fake", c_fake, step_gan)
+                                writer.add_scalar("c_real", c_real, step_gan)
+                                writer.add_scalar("gradient_penalty", gradient_penalty, step_gan)
+                        
+                        elif dcgan:
                             _, yf_fakes = self.model(batch["img"], gan = True) # yf: yolo features
                             _, yf_reals = self.model(batch_real["img"], gan = True)
-
-                            # combine features real/fake
                             yf_real = []
                             yf_fake = []
                             for f_r, f_f in zip(yf_reals, yf_fakes):
@@ -348,68 +384,51 @@ class BaseTrainer:
                             yf_real = torch.concat(yf_real, dim = 1) # 1792 x 40 x 40
                             yf_fake = torch.concat(yf_fake, dim = 1)
 
-                            # feed Critic Model & cal loss D
-                            critic_model.zero_grad()
-                            c_real = critic_model(yf_real)
-                            c_real = c_real.mean()
+                            d_real = critic_model(yf_real)
+                            d_fake = critic_model(yf_fake)
 
-                            c_fake = critic_model(yf_fake)
-                            c_fake = c_fake.mean()
+                            d_loss_real = criterionGAN(d_real, True)
+                            d_loss_fake = criterionGAN(d_fake, False)
+                            d_loss = 0.5*(d_loss_fake + d_loss_real)
 
-                            gradient_penalty = self.calc_gradient_penalty(critic_model, yf_real, yf_fake,  device=self.device, LAMBDA=10)
-
-                            c_total_loss = c_fake - c_real + gradient_penalty
-                            c_total_loss.backward()
+                            critic_optim.zero_grad()
+                            d_loss.backward()
                             critic_optim.step()
-                            writer.add_scalar("c_total_loss", c_total_loss, step_gan)
-                            writer.add_scalar("c_fake", c_fake, step_gan)
-                            writer.add_scalar("c_real", c_real, step_gan)
-                            writer.add_scalar("gradient_penalty", gradient_penalty, step_gan)
-                        
-                        else:
-                            _, yf_fake = self.model(batch["img"], gan = True) # yf: yolo features
-                            _, yf_real = self.model(batch_real["img"], gan = True)
-
-                            # d_losses = 0
-                            # for cr in range(len(self.critics)):
-                            #     d_loss_real = criterionGAN(cr_out_real[cr], True)
-                            #     d_loss_fake = criterionGAN(cr_out_fake[cr], False)
-                            #     d_loss = 0.5*(d_loss_fake + d_loss_real)
-                            #     d_losses += d_loss.item()
-
-                            #     self.critic_optims[cr].zero_grad()
-                            #     d_loss.backward()
-                            #     self.critic_optims[cr].step()
-                            
-                            # cr_losses = d_losses # for print
+            
+                            c_total_loss = d_loss # for print
 
                         #------------ train Yolo -----------#
-                        preds, yf_fake = self.model(batch["img"], gan = True, train_G = True) # yf: yolo features
+                        preds, yf_fakes = self.model(batch["img"], gan = True, train_G = True) # yf: yolo features
                         yf_fake = []
                         for f_f in yf_fakes:
-                            yf_fake.append(f_f.reshape(self.batch_size, -1, combine_res, combine_res))
+                            # yf_fake.append(f_f.reshape(self.batch_size, -1, combine_res, combine_res))
+                            kernel_size = f_f.size(3)//combine_res
+                            yf_fake.append(integrating(f_f, kernel_size))
+
                         yf_fake = torch.concat(yf_fake, dim = 1)
 
                         if wgan:
-                            alpha_critic = 0.1
                             g_fake = critic_model(yf_fake)
                             g_fake = g_fake.mean()
 
                             self.loss, self.loss_items = self.criterion(preds, batch) # YOLO loss
-                            self.loss = self.loss - alpha_critic*g_fake  # -D(G(z))
-                            self.loss_items = self.loss_items - alpha_critic*g_fake.item()
+                            alpha_yolo = 10
+                            alpha_critic = 0.1
+
+                            self.loss = alpha_yolo*self.loss - alpha_critic*g_fake  # -D(G(z))
+                            self.loss_items = alpha_yolo*self.loss_items - alpha_critic*g_fake.item()
 
                             writer.add_scalar("g_fake", -alpha_critic*g_fake, step_gan)
                             step_gan += 1
 
-                        else:
+                        elif dcgan: 
                             alpha_critic = 5
-                            # for cr in range(len(self.critics)):
-                            #     cr_fake_all_loss += criterionGAN(cr_out_fake[cr], True)
+                            g_fake = critic_model(yf_fake)
+                            g_fake = criterionGAN(g_fake, True)
 
-                            # self.loss, self.loss_items = self.criterion(preds, batch) # YOLO loss
-                            # self.loss = self.loss + alpha_critic*cr_fake_all_loss
-                            # self.loss_items = self.loss_items + alpha_critic*cr_fake_all_loss.item()
+                            self.loss, self.loss_items = self.criterion(preds, batch) # YOLO loss
+                            self.loss = self.loss + alpha_critic*g_fake
+                            self.loss_items = self.loss_items + alpha_critic*g_fake.item()
 
                         if rank != -1:
                             self.loss *= world_size
@@ -427,7 +446,7 @@ class BaseTrainer:
                             self.loss *= world_size
                         self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
                             else self.loss_items
-                        cr_losses = 0
+                        c_total_loss = 0
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -782,3 +801,24 @@ class GANLoss(nn.Module):
         
         loss = self.loss(prediction, target_tensor)
         return loss
+
+def integrating_np(tensor, kernel):
+    array = tensor.detach().cpu().numpy()
+    chan = array.shape[1]
+    batch = array.shape[0]
+    feature_stacks = []
+    for b in range(batch):
+        feature_stacks.append(np.dstack([array[b,c,i::kernel,j::kernel] for i in range(kernel) for j in range(kernel) for c in range(chan)]))
+    feature_stacks = np.array(feature_stacks)
+    return torch.tensor(np.transpose(feature_stacks, (0, 3, 1, 2)))
+
+def integrating(tensor, kernel):
+    chan = tensor.size(1)
+    batch = tensor.size(0)
+    feature_stacks = []
+    for b in range(batch):
+        feature_stacks.append(torch.dstack([tensor[b,c,i::kernel,j::kernel] for i in range(kernel) for j in range(kernel) for c in range(chan)]))
+
+    feature_stacks = torch.stack(feature_stacks)
+    return feature_stacks.permute((0, 3, 1, 2))
+

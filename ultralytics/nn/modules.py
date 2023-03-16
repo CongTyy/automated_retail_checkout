@@ -521,8 +521,7 @@ class Critic(nn.Module):
             CriticConv(in_chan, 256),
             CriticRes(256, 256),
             CriticRes(256, 256),
-            CriticConv(256, 256*2),
-            nn.Conv2d(256*2, 1, 1)
+            nn.Conv2d(256, 1, 1)
         )
 
         
