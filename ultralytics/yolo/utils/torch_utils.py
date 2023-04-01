@@ -17,29 +17,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER
+from ultralytics.yolo.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, __version__
 from ultralytics.yolo.utils.checks import check_version
 
 LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv('RANK', -1))
 WORLD_SIZE = int(os.getenv('WORLD_SIZE', 1))
 
+TORCH_1_9 = check_version(torch.__version__, '1.9.0')
+TORCH_1_11 = check_version(torch.__version__, '1.11.0')
+TORCH_1_12 = check_version(torch.__version__, '1.12.0')
+
 
 @contextmanager
 def torch_distributed_zero_first(local_rank: int):
     # Decorator to make all processes in distributed training wait for each local_master to do something
     initialized = torch.distributed.is_available() and torch.distributed.is_initialized()
-    if initialized and local_rank not in {-1, 0}:
+    if initialized and local_rank not in (-1, 0):
         dist.barrier(device_ids=[local_rank])
     yield
     if initialized and local_rank == 0:
         dist.barrier(device_ids=[0])
 
 
-def smart_inference_mode(torch_1_9=check_version(torch.__version__, '1.9.0')):
+def smart_inference_mode():
     # Applies torch.inference_mode() decorator if torch>=1.9.0 else torch.no_grad() decorator
     def decorate(fn):
-        return (torch.inference_mode if torch_1_9 else torch.no_grad)()(fn)
+        return (torch.inference_mode if TORCH_1_9 else torch.no_grad)()(fn)
 
     return decorate
 
@@ -49,16 +53,15 @@ def DDP_model(model):
     assert not check_version(torch.__version__, '1.12.0', pinned=True), \
         'torch==1.12.0 torchvision==0.13.0 DDP training is not supported due to a known issue. ' \
         'Please upgrade or downgrade torch to use DDP. See https://github.com/ultralytics/yolov5/issues/8395'
-    if check_version(torch.__version__, '1.11.0'):
+    if TORCH_1_11:
         return DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK, static_graph=True)
     else:
         return DDP(model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
 
 
-def select_device(device='', batch=0, newline=False):
+def select_device(device='', batch=0, newline=False, verbose=True):
     # device = None or 'cpu' or 0 or '0' or '0,1,2,3'
-    from ultralytics import __version__
-    s = f"Ultralytics YOLOv{__version__} 🚀 Python-{platform.python_version()} torch-{torch.__version__} "
+    s = f'Ultralytics YOLOv{__version__} 🚀 Python-{platform.python_version()} torch-{torch.__version__} '
     device = str(device).lower()
     for remove in 'cuda:', 'none', '(', ')', '[', ']', "'", ' ':
         device = device.replace(remove, '')  # to string, 'cuda:0' -> '0' and '(0, 1)' -> '0,1'
@@ -71,15 +74,15 @@ def select_device(device='', batch=0, newline=False):
         os.environ['CUDA_VISIBLE_DEVICES'] = device  # set environment variable - must be before assert is_available()
         if not (torch.cuda.is_available() and torch.cuda.device_count() >= len(device.replace(',', ''))):
             LOGGER.info(s)
-            install = "See https://pytorch.org/get-started/locally/ for up-to-date torch install instructions if no " \
-                      "CUDA devices are seen by torch.\n" if torch.cuda.device_count() == 0 else ""
+            install = 'See https://pytorch.org/get-started/locally/ for up-to-date torch install instructions if no ' \
+                      'CUDA devices are seen by torch.\n' if torch.cuda.device_count() == 0 else ''
             raise ValueError(f"Invalid CUDA 'device={device}' requested."
                              f" Use 'device=cpu' or pass valid CUDA device(s) if available,"
                              f" i.e. 'device=0' or 'device=0,1,2,3' for Multi-GPU.\n"
-                             f"\ntorch.cuda.is_available(): {torch.cuda.is_available()}"
-                             f"\ntorch.cuda.device_count(): {torch.cuda.device_count()}"
+                             f'\ntorch.cuda.is_available(): {torch.cuda.is_available()}'
+                             f'\ntorch.cuda.device_count(): {torch.cuda.device_count()}'
                              f"\nos.environ['CUDA_VISIBLE_DEVICES']: {visible}\n"
-                             f"{install}")
+                             f'{install}')
 
     if not cpu and not mps and torch.cuda.is_available():  # prefer GPU if available
         devices = device.split(',') if device else '0'  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
@@ -99,7 +102,7 @@ def select_device(device='', batch=0, newline=False):
         s += 'CPU\n'
         arg = 'cpu'
 
-    if RANK == -1:
+    if verbose and RANK == -1:
         LOGGER.info(s if newline else s.rstrip())
     return torch.device(arg)
 
@@ -135,22 +138,49 @@ def fuse_conv_and_bn(conv, bn):
     return fusedconv
 
 
-def model_info(model, verbose=False, imgsz=640):
+def fuse_deconv_and_bn(deconv, bn):
+    fuseddconv = nn.ConvTranspose2d(deconv.in_channels,
+                                    deconv.out_channels,
+                                    kernel_size=deconv.kernel_size,
+                                    stride=deconv.stride,
+                                    padding=deconv.padding,
+                                    output_padding=deconv.output_padding,
+                                    dilation=deconv.dilation,
+                                    groups=deconv.groups,
+                                    bias=True).requires_grad_(False).to(deconv.weight.device)
+
+    # prepare filters
+    w_deconv = deconv.weight.clone().view(deconv.out_channels, -1)
+    w_bn = torch.diag(bn.weight.div(torch.sqrt(bn.eps + bn.running_var)))
+    fuseddconv.weight.copy_(torch.mm(w_bn, w_deconv).view(fuseddconv.weight.shape))
+
+    # Prepare spatial bias
+    b_conv = torch.zeros(deconv.weight.size(1), device=deconv.weight.device) if deconv.bias is None else deconv.bias
+    b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(torch.sqrt(bn.running_var + bn.eps))
+    fuseddconv.bias.copy_(torch.mm(w_bn, b_conv.reshape(-1, 1)).reshape(-1) + b_bn)
+
+    return fuseddconv
+
+
+def model_info(model, detailed=False, verbose=True, imgsz=640):
     # Model information. imgsz may be int or list, i.e. imgsz=640 or imgsz=[640, 320]
+    if not verbose:
+        return
     n_p = get_num_params(model)
     n_g = get_num_gradients(model)  # number gradients
-    if verbose:
-        print(f"{'layer':>5} {'name':>40} {'gradient':>9} {'parameters':>12} {'shape':>20} {'mu':>10} {'sigma':>10}")
+    if detailed:
+        LOGGER.info(
+            f"{'layer':>5} {'name':>40} {'gradient':>9} {'parameters':>12} {'shape':>20} {'mu':>10} {'sigma':>10}")
         for i, (name, p) in enumerate(model.named_parameters()):
             name = name.replace('module_list.', '')
-            print('%5g %40s %9s %12g %20s %10.3g %10.3g' %
-                  (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
+            LOGGER.info('%5g %40s %9s %12g %20s %10.3g %10.3g' %
+                        (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
 
     flops = get_flops(model, imgsz)
     fused = ' (fused)' if model.is_fused() else ''
     fs = f', {flops:.1f} GFLOPs' if flops else ''
     m = Path(getattr(model, 'yaml_file', '') or model.yaml.get('yaml_file', '')).stem.replace('yolo', 'YOLO') or 'Model'
-    LOGGER.info(f"{m} summary{fused}: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")
+    LOGGER.info(f'{m} summary{fused}: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}')
 
 
 def get_num_params(model):
@@ -167,7 +197,7 @@ def get_flops(model, imgsz=640):
         p = next(model.parameters())
         stride = max(int(model.stride.max()), 32) if hasattr(model, 'stride') else 32  # max stride
         im = torch.empty((1, p.shape[1], stride, stride), device=p.device)  # input image in BCHW format
-        flops = thop.profile(deepcopy(model), inputs=(im,), verbose=False)[0] / 1E9 * 2  # stride GFLOPs
+        flops = thop.profile(deepcopy(model), inputs=[im], verbose=False)[0] / 1E9 * 2  # stride GFLOPs
         imgsz = imgsz if isinstance(imgsz, list) else [imgsz, imgsz]  # expand if int/float
         flops = flops * imgsz[0] / stride * imgsz[1] / stride  # 640x640 GFLOPs
         return flops
@@ -215,6 +245,11 @@ def copy_attr(a, b, include=(), exclude=()):
             setattr(a, k, v)
 
 
+def get_latest_opset():
+    # Return max supported ONNX opset by this version of torch
+    return max(int(k[14:]) for k in vars(torch.onnx) if 'symbolic_opset' in k)  # opset
+
+
 def intersect_dicts(da, db, exclude=()):
     # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
     return {k: v for k, v in da.items() if k in db and all(x not in k for x in exclude) and v.shape == db[k].shape}
@@ -222,7 +257,7 @@ def intersect_dicts(da, db, exclude=()):
 
 def is_parallel(model):
     # Returns True if model is of type DP or DDP
-    return type(model) in (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel)
+    return isinstance(model, (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel))
 
 
 def de_parallel(model):
@@ -243,7 +278,7 @@ def init_seeds(seed=0, deterministic=False):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)  # for Multi-GPU, exception safe
     # torch.backends.cudnn.benchmark = True  # AutoBatch problem https://github.com/ultralytics/yolov5/issues/9287
-    if deterministic and check_version(torch.__version__, '1.12.0'):  # https://github.com/ultralytics/yolov5/pull/8213
+    if deterministic and TORCH_1_12:  # https://github.com/ultralytics/yolov5/pull/8213
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
@@ -330,8 +365,8 @@ def profile(input, ops, n=10, device=None):
     results = []
     if not isinstance(device, torch.device):
         device = select_device(device)
-    print(f"{'Params':>12s}{'GFLOPs':>12s}{'GPU_mem (GB)':>14s}{'forward (ms)':>14s}{'backward (ms)':>14s}"
-          f"{'input':>24s}{'output':>24s}")
+    LOGGER.info(f"{'Params':>12s}{'GFLOPs':>12s}{'GPU_mem (GB)':>14s}{'forward (ms)':>14s}{'backward (ms)':>14s}"
+                f"{'input':>24s}{'output':>24s}")
 
     for x in input if isinstance(input, list) else [input]:
         x = x.to(device)
@@ -341,7 +376,7 @@ def profile(input, ops, n=10, device=None):
             m = m.half() if hasattr(m, 'half') and isinstance(x, torch.Tensor) and x.dtype is torch.float16 else m
             tf, tb, t = 0, 0, [0, 0, 0]  # dt forward, backward
             try:
-                flops = thop.profile(m, inputs=(x,), verbose=False)[0] / 1E9 * 2  # GFLOPs
+                flops = thop.profile(m, inputs=[x], verbose=False)[0] / 1E9 * 2  # GFLOPs
             except Exception:
                 flops = 0
 
@@ -361,10 +396,10 @@ def profile(input, ops, n=10, device=None):
                 mem = torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0  # (GB)
                 s_in, s_out = (tuple(x.shape) if isinstance(x, torch.Tensor) else 'list' for x in (x, y))  # shapes
                 p = sum(x.numel() for x in m.parameters()) if isinstance(m, nn.Module) else 0  # parameters
-                print(f'{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}')
+                LOGGER.info(f'{p:12}{flops:12.4g}{mem:>14.3f}{tf:14.4g}{tb:14.4g}{str(s_in):>24s}{str(s_out):>24s}')
                 results.append([p, flops, mem, tf, tb, s_in, s_out])
             except Exception as e:
-                print(e)
+                LOGGER.info(e)
                 results.append(None)
             torch.cuda.empty_cache()
     return results
