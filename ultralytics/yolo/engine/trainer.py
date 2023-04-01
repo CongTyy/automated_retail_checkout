@@ -390,10 +390,10 @@ class BaseTrainer:
                 rgl = False
                 wgan = False
                 wgan_domain = False
-                dcgan = True
+                self.dcgan = True
                 # torch.use_deterministic_algorithms(True, warn_only=True)
                 with torch.cuda.amp.autocast(self.amp):
-                    if rgl or wgan or wgan_domain or dcgan:
+                    if rgl or wgan or wgan_domain or self.dcgan:
                         try:
                             batch_real = next(iter(self.real_pbar))[1]
                             # batch_real = self.real_pbar.__next__()[1]
@@ -516,7 +516,7 @@ class BaseTrainer:
                         self.writer.add_scalar('scale', scale, self.step_gan)
                         self.writer.add_scalar('c_domain', c_domain.item(), self.step_gan) 
                     
-                    elif dcgan:
+                    elif self.dcgan:
                         '''
                         4: 64 160 160
                         6: 128 80 80
@@ -562,21 +562,6 @@ class BaseTrainer:
                         self.d1_optim.step()
                         self.d2_optim.step()
                         self.d3_optim.step()
-
-                        # self.d_losses['ds_1_loss'].append(ds_1_loss.item())
-                        # self.d_losses['ds_2_loss'].append(ds_2_loss.item())
-                        # self.d_losses['ds_3_loss'].append(ds_3_loss.item())
-                        # self.d_losses['dt_1_loss'].append(dt_1_loss.item())
-                        # self.d_losses['dt_2_loss'].append(dt_2_loss.item())
-                        # self.d_losses['dt_3_loss'].append(dt_3_loss.item())
-                        # self.d_losses['dloss'].append((ds_1_loss + ds_2_loss + ds_3_loss + dt_1_loss + dt_2_loss + dt_3_loss).item())
-                        # self.writer.add_scalar('loss_d/ds_1_loss', np.mean(self.d_losses['ds_1_loss']), self.step_gan)
-                        # self.writer.add_scalar('loss_d/ds_2_loss', np.mean(self.d_losses['ds_2_loss']), self.step_gan) 
-                        # self.writer.add_scalar('loss_d/ds_3_loss', np.mean(self.d_losses['ds_3_loss']), self.step_gan) 
-                        # self.writer.add_scalar('loss_d/dt_1_loss', np.mean(self.d_losses['dt_1_loss']), self.step_gan)
-                        # self.writer.add_scalar('loss_d/dt_2_loss', np.mean(self.d_losses['dt_2_loss']), self.step_gan) 
-                        # self.writer.add_scalar('loss_d/dt_3_loss', np.mean(self.d_losses['dt_3_loss']), self.step_gan) 
-                        # self.writer.add_scalar('loss_d/dloss', np.mean(self.d_losses['dloss']), self.step_gan)
 
                         self.writer.add_scalar('loss_d/ds_1_loss', ds_1_loss.item(), self.step_gan)
                         self.writer.add_scalar('loss_d/ds_2_loss', ds_2_loss.item(), self.step_gan) 
@@ -673,7 +658,7 @@ class BaseTrainer:
 
                 if self.args.val or final_epoch:
                     _, testfitness = self._test_real()
-                    self.writer.add_scalar('fitness test',  testfitness, self.step_gan)  
+                    self.writer.add_scalar('fitness test',  testfitness, epoch)  
 
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
@@ -712,7 +697,11 @@ class BaseTrainer:
         self.run_callbacks('teardown')
 
     def save_model(self):
-        # torch.save(self.critic.state_dict(), self.save_dir / 'd.pth')
+        if self.dcgan and s:
+            torch.save(self.d1.state_dict(), self.save_dir / 'd1.pth')
+            torch.save(self.d2.state_dict(), self.save_dir / 'd2.pth')
+            torch.save(self.d3.state_dict(), self.save_dir / 'd3.pth')
+
         ckpt = {
             'epoch': self.epoch,
             'best_fitness': self.best_fitness,
