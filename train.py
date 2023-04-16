@@ -1,14 +1,14 @@
 from ultralytics import YOLO
 
 # model = YOLO("best.pt")  # load a pretrained model (recommended for training
-# model = YOLO("yolov8/domain_yoloN/train9/weights/best.pt")  # load a pretrained model (recommended for training
+# model = YOLO("yolov8/multidomain_dcGAN_yoloN/ok/weights/best.pt")  # load a pretrained model (recommended for training
 model = YOLO("yolov8n.pt")
 model.train(data="aic.yaml", 
             epochs = 300, 
             batch = 8, 
             imgsz = 1280, 
             device = 'cuda:1', 
-            project='yolov8/multidomain_dcGAN_yoloN', 
+            project='yolov8/multi_layers_weak_dis', 
             optimizer = 'Adam',
             box = 7.5, #7.5,
             cls = 0.5, #0.5,

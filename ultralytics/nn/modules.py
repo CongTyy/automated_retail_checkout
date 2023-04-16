@@ -473,102 +473,102 @@ class Classify(nn.Module):
         return x if self.training else x.softmax(1)
 
 
-# #------------------------------------------------------- GAN ---------------------------------------------#
-# class DomainConv(nn.Module):
-#     def __init__(self, in_chan, out_chan) -> None:
-#         super().__init__()
-#         self.layer = nn.Sequential(
-#             spectral_norm(nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False)),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             spectral_norm(nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False)),
-#             nn.LeakyReLU(0.2, inplace=True),
+#------------------------------------------------------- GAN ---------------------------------------------#
+class DomainConv(nn.Module):
+    def __init__(self, in_chan, out_chan) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            spectral_norm(nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
 
-#             # nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False),
-#             # nn.InstanceNorm2d(out_chan, affine=True),
-#             # nn.LeakyReLU(0.2, inplace=True),
-#             # nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False),
-#             # nn.InstanceNorm2d(out_chan, affine=True),
-#             # nn.LeakyReLU(0.2, inplace=True),
-#         )
-#     def forward(self, x):
-#         return self.layer(x)
+            # nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False),
+            # nn.InstanceNorm2d(out_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+            # nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(out_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+        )
+    def forward(self, x):
+        return self.layer(x)
   
-# class DomainRes(nn.Module):
-#     def __init__(self, in_chan) -> None:
-#         super().__init__()
-#         self.layer = nn.Sequential(
-#             spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
-#             nn.LeakyReLU(0.2, inplace=True),
-#             spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
-#             # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
-#             # nn.InstanceNorm2d(in_chan, affine=True),
-#             # nn.LeakyReLU(0.2, inplace=True),
-#             # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
-#             # nn.InstanceNorm2d(in_chan, affine=True),
-#         )
-#         self.act = nn.LeakyReLU(0.2, inplace=True)
-#     def forward(self, x):
-#         return self.act((x + self.layer(x))/math.sqrt(2))
+class DomainRes(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(in_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+            # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(in_chan, affine=True),
+        )
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+    def forward(self, x):
+        return self.act((x + self.layer(x))/math.sqrt(2))
 
-# class Domain(nn.Module):
-#     def __init__(self, in_chan, combine_res = 40) -> None:
-#         super().__init__()
-#         self.grl = GradientReversalLayer()
-#         self.combine_res = combine_res
-#         self.layers = nn.Sequential(
-#             DomainConv(in_chan, 256),
-#             DomainRes(256),
-#             nn.Conv2d(256, 2, 1),
-#             nn.AdaptiveAvgPool2d(output_size=(1, 1)),
-#             nn.LogSoftmax(),
-#         )
-#     def forward(self, x, alpha = 1):
-#         out = self.grl.apply(x, alpha)
-#         return self.layers(out)
+class Domain(nn.Module):
+    def __init__(self, in_chan, combine_res = 40) -> None:
+        super().__init__()
+        self.grl = GradientReversalLayer()
+        self.combine_res = combine_res
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 256),
+            DomainRes(256),
+            nn.Conv2d(256, 2, 1),
+            nn.AdaptiveAvgPool2d(output_size=(1, 1)),
+            nn.LogSoftmax(),
+        )
+    def forward(self, x, alpha = 1):
+        out = self.grl.apply(x, alpha)
+        return self.layers(out)
 
 
-# class Critic(nn.Module):
-#     def __init__(self, in_chan) -> None:
-#         super().__init__()
-#         self.layers = nn.Sequential(
-#             DomainConv(in_chan, 128),
-#             DomainRes(128),
-#             DomainConv(128, 256),
-#             DomainRes(256),
-#             DomainConv(256, 256),
-#             nn.Conv2d(256, 1, 1, bias = False),
-#         )
+class Critic(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 128),
+            DomainRes(128),
+            DomainConv(128, 256),
+            DomainRes(256),
+            DomainConv(256, 256),
+            nn.Conv2d(256, 1, 1, bias = False),
+        )
     
-#     @staticmethod
-#     def init_weights(m):
-#         if isinstance(m, nn.Conv2d):
-#             nn.init.kaiming_normal_(m.weight)
-#             if m.bias is not None:
-#                 nn.init.zeros_(m.bias)
+    # @staticmethod
+    # def init_weights(m):
+    #     if isinstance(m, nn.Conv2d):
+    #         nn.init.kaiming_normal_(m.weight)
+    #         if m.bias is not None:
+    #             nn.init.zeros_(m.bias)
 
-#     def forward(self, x):
-#         return self.layers(x)
+    def forward(self, x):
+        return self.layers(x)
 
 
-# class Discriminator(nn.Module):
-#     def __init__(self, in_chan) -> None:
-#         super().__init__()
-#         self.layers = nn.Sequential(
-#             DomainConv(in_chan, 128),
-#             DomainRes(128),
-#             DomainConv(128, 256),
-#             DomainRes(256),
-#             DomainConv(256, 256),
-#             nn.Conv2d(256, 1, 1, bias = False),
-#             # nn.Sigmoid()
-#         )
+class Discriminator(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 128),
+            DomainRes(128),
+            DomainConv(128, 256),
+            DomainRes(256),
+            DomainConv(256, 256),
+            nn.Conv2d(256, 1, 1, bias = False),
+            # nn.Sigmoid()
+        )
     
-#     @staticmethod
-#     def init_weights(m):
-#         if isinstance(m, nn.Conv2d):
-#             nn.init.kaiming_normal_(m.weight)
-#             if m.bias is not None:
-#                 nn.init.zeros_(m.bias)
+    @staticmethod
+    def init_weights(m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
 
-#     def forward(self, x):
-#         return self.layers(x)
+    def forward(self, x):
+        return self.layers(x)

@@ -297,7 +297,8 @@ class BaseTrainer:
         self.writer = SummaryWriter(log_dir=self.save_dir / "gan")
         self.step_gan = 0
         self.weight_cliping_limit = 0.01
-        self.dcgan_cri = nn.CrossEntropyLoss()
+        # self.dcgan_cri = nn.CrossEntropyLoss()
+        self.dcgan_cri = nn.BCEWithLogitsLoss()
 
         self.d_losses = {
             'ds_1_loss': [],
@@ -327,6 +328,7 @@ class BaseTrainer:
 
         self.d3 = D_layer9().to(self.device)
         self.d3.apply(init_weights)
+        # self.d3.load_state_dict(torch.load("yolov8/one_layer_dcGAN/train4/d3.pth"))
         self.d3_optim = torch.optim.Adam(self.d3.parameters(), lr = self.d_lr, betas=(0.5, 0.999))
         # ------------ #
 
@@ -391,9 +393,11 @@ class BaseTrainer:
                 wgan = False
                 wgan_domain = False
                 self.dcgan = True
+                tsne = False
+                self._onelayerdcgan = False
                 # torch.use_deterministic_algorithms(True, warn_only=True)
                 with torch.cuda.amp.autocast(self.amp):
-                    if rgl or wgan or wgan_domain or self.dcgan:
+                    if rgl or wgan or wgan_domain or self.dcgan or tsne or self._onelayerdcgan:
                         try:
                             batch_real = next(iter(self.real_pbar))[1]
                             # batch_real = self.real_pbar.__next__()[1]
@@ -406,7 +410,22 @@ class BaseTrainer:
                         batch_real = self.preprocess_batch(batch_real)
 
                     batch = self.preprocess_batch(batch)
-                        
+
+                    # if tsne:
+                    #     self.model.eval()
+                    #     _yfs = []
+                    #     with torch.no_grad():
+                    #         for i, batch in pbar:
+                    #             batch = self.preprocess_batch(batch)
+                    #             yfsource = self.model(batch['img'], gan = True)
+                    #             yfs = yfsource[0].reshape(1, -1).cpu().numpy() # 8 x D
+                    #             for yf in yfs:
+                    #                 _yfs.append(yf)
+                    #         np.save('f1.npy', _yfs)
+                    #             # yftarget = self.model(batch_real['img'], gan = True)
+
+                    #     exit()
+
                     if rgl:
                         self.domain_optim.zero_grad()
                         # source 
@@ -497,9 +516,9 @@ class BaseTrainer:
                         self.writer.add_scalar('gp', gp.item(), self.step_gan)
                         self.writer.add_scalar('c_loss', c_loss.item(), self.step_gan)
 
-                        if (self.step_gan + 1) % 5 != 0:
-                            self.step_gan += 1
-                            continue 
+                        # if (self.step_gan + 1) % 5 != 0:
+                        #     self.step_gan += 1
+                        #     continue 
                         
                         # train YOLO
                         self.model.train()
@@ -516,13 +535,14 @@ class BaseTrainer:
                         self.writer.add_scalar('scale', scale, self.step_gan)
                         self.writer.add_scalar('c_domain', c_domain.item(), self.step_gan) 
                     
-                    elif self.dcgan:
+                    elif self._onelayerdcgan:
                         '''
                         4: 64 160 160
                         6: 128 80 80
                         9: 256 40 40 
                         '''
                         # self.set_requires_grad(self.model, False)
+                        # # if epoch % 1 == 0:
                         self.set_requires_grad(self.d1, True)
                         self.set_requires_grad(self.d2, True)
                         self.set_requires_grad(self.d3, True)
@@ -535,26 +555,103 @@ class BaseTrainer:
                         # visualize_feature(yfsource, "yfsource.png", batch['img'])
                         # visualize_feature(yftarget, "yftarget.png", batch_real['img'])
                         # train Critic
-                        target_gt = Variable(torch.ones(self.batch_size)).long().to(self.device)
-                        source_gt = Variable(torch.zeros(self.batch_size)).long().to(self.device)
+                        self.d3_optim.zero_grad()
+                        target_gt = Variable(torch.zeros(self.batch_size, 1)).to(self.device)
+                        source_gt = Variable(torch.ones(self.batch_size, 1)).to(self.device)
+
+                        # ds_3 = torch.sigmoid(self.d3(yfsource[2].detach()))
+                        # ds_3_loss = 0.5*(torch.mean((1 - ds_3)**2)) 
+                        ds_3 = self.d3(yfsource[2].detach())
+                        # ds_3 = torch.log_softmax(ds_3, 1)
+                        ds_3_loss = self.dcgan_cri(ds_3, source_gt)
+
+                        # dt_3 = torch.sigmoid(self.d3(yftarget[2].detach()))
+                        # dt_3_loss = 0.5*(torch.mean((dt_3)**2)) # Weighted Least-squares (LS) Loss
+                        dt_3 = self.d3(yftarget[2].detach())
+                        # dt_3 = torch.log_softmax(dt_3, 1)
+                        dt_3_loss = self.dcgan_cri(dt_3, target_gt)
+
+                        c_loss = ds_3_loss + dt_3_loss
+                        c_loss.backward()
+                        self.d3_optim.step()
+
+                        self.writer.add_scalar('loss_d/ds_3_loss', ds_3_loss.item(), self.step_gan) 
+                        self.writer.add_scalar('loss_d/dt_3_loss', dt_3_loss.item(), self.step_gan) 
+                        self.writer.add_scalar('loss_d/dloss', c_loss.item(), self.step_gan)
+                        self.writer.add_scalar('pred_d/pred_dt_3', torch.sigmoid(dt_3).mean().item(), self.step_gan) 
+                        self.writer.add_scalar('pred_d/pred_ds_3', torch.sigmoid(ds_3).mean().item(), self.step_gan) 
+                        
+                        # if (self.step_gan + 1) % 5 != 0:
+                        #     self.step_gan += 1
+                        #     continue 
+                        
+                        # train YOLO
+                        self.model.train()
+                        self.set_requires_grad(self.d3, False)
+                        # pred
+                        yfsource = self.model(batch['img'], gan = True)
+                        # critic loss
+                        # d_domain_3 = torch.sigmoid(self.d3(yfsource[2]))
+                        # d_domain_3_loss = 0.5*(torch.mean((d_domain_3)**2)) # Weighted Least-squares (LS) Loss
+                        d_domain_3 = self.d3(yfsource[2])
+                        # d_domain_3 = torch.log_softmax(d_domain_3, 1)
+                        d_domain_3_loss = self.dcgan_cri(d_domain_3, target_gt) # logsoftmax for loss
+
+                        d_alpha = 50
+                        d_domain_loss = d_alpha*(d_domain_3_loss)
+                        # backward 1
+                        d_domain_loss.backward() 
+                        self.writer.add_scalar('domain_loss/d_domain_3_loss', d_domain_3_loss.item(), self.step_gan)
+                        self.writer.add_scalar('domain_loss/d_domain_loss', d_domain_loss.item(), self.step_gan)
+                        self.writer.add_scalar('pred_d/pred_d_domain_3', torch.sigmoid(d_domain_3).mean().item(), self.step_gan) 
+
+                        # yolo loss
+                        preds = self.model(batch['img'])
+                        self.loss, self.loss_items = self.criterion(preds, batch)
+                        self.writer.add_scalar('loss_y', self.loss.item(), self.step_gan)
+
+                    elif self.dcgan:
+                        '''
+                        4: 64 160 160
+                        6: 128 80 80
+                        9: 256 40 40 
+                        '''
+                        # self.set_requires_grad(self.model, False)
+                        # if epoch % 1 == 0:
+                        self.set_requires_grad(self.d1, True)
+                        self.set_requires_grad(self.d2, True)
+                        self.set_requires_grad(self.d3, True)
+
+                        self.model.eval()
+                        with torch.no_grad():
+                            yfsource = self.model(batch['img'], gan = True)
+                            yftarget = self.model(batch_real['img'], gan = True)
+                            
+                        # visualize_feature(yfsource, "yfsource.png", batch['img'])
+                        # visualize_feature(yftarget, "yftarget.png", batch_real['img'])
+                        # train Critic
+                        target_gt = Variable(torch.zeros(self.batch_size, 1)).to(self.device)
+                        source_gt = Variable(torch.ones(self.batch_size, 1)).to(self.device)
 
                         
                         self.d1_optim.zero_grad()
                         self.d2_optim.zero_grad()
                         self.d3_optim.zero_grad()
 
-                        ds_1 = torch.sigmoid(self.d1(yfsource[0].detach()))
-                        ds_1_loss = 0.5*(torch.mean(ds_1**2)) # Weighted Least-squares (LS) Loss
+                        ds_1 = self.d1(yfsource[0].detach())
                         ds_2 = self.d2(yfsource[1].detach())
-                        ds_2_loss = self.dcgan_cri(ds_2, source_gt)
                         ds_3 = self.d3(yfsource[2].detach())
+
+                        ds_1_loss = self.dcgan_cri(ds_1, source_gt)
+                        ds_2_loss = self.dcgan_cri(ds_2, source_gt)
                         ds_3_loss = self.dcgan_cri(ds_3, source_gt)
 
-                        dt_1 = torch.sigmoid(self.d1(yftarget[0].detach()))
-                        dt_1_loss = 0.5*(torch.mean((1 - dt_1)**2)) # Weighted Least-squares (LS) Loss
+                        dt_1 = self.d1(yftarget[0].detach())
                         dt_2 = self.d2(yftarget[1].detach())
-                        dt_2_loss = self.dcgan_cri(dt_2, target_gt)
                         dt_3 = self.d3(yftarget[2].detach())
+
+                        dt_1_loss = self.dcgan_cri(dt_1, target_gt)
+                        dt_2_loss = self.dcgan_cri(dt_2, target_gt)
                         dt_3_loss = self.dcgan_cri(dt_3, target_gt)
 
                         c_loss = ds_1_loss + ds_2_loss + ds_3_loss + dt_1_loss + dt_2_loss + dt_3_loss
@@ -563,18 +660,17 @@ class BaseTrainer:
                         self.d2_optim.step()
                         self.d3_optim.step()
 
-                        self.writer.add_scalar('loss_d/ds_1_loss', ds_1_loss.item(), self.step_gan)
-                        self.writer.add_scalar('loss_d/ds_2_loss', ds_2_loss.item(), self.step_gan) 
                         self.writer.add_scalar('loss_d/ds_3_loss', ds_3_loss.item(), self.step_gan) 
-                        self.writer.add_scalar('loss_d/dt_1_loss', dt_1_loss.item(), self.step_gan)
-                        self.writer.add_scalar('loss_d/dt_2_loss', dt_2_loss.item(), self.step_gan) 
                         self.writer.add_scalar('loss_d/dt_3_loss', dt_3_loss.item(), self.step_gan) 
-                        self.writer.add_scalar('loss_d/dloss', (ds_1_loss + ds_2_loss + ds_3_loss + dt_1_loss + dt_2_loss + dt_3_loss).item(), self.step_gan)
-                        
-                        # if (self.step_gan + 1) % 5 != 0:
-                        #     self.step_gan += 1
-                        #     continue 
-                        
+                        self.writer.add_scalar('loss_d/dloss', c_loss.item(), self.step_gan)
+                        self.writer.add_scalar('pred_d/pred_dt_1', torch.sigmoid(dt_1).mean().item(), self.step_gan) 
+                        self.writer.add_scalar('pred_d/pred_ds_1', torch.sigmoid(ds_1).mean().item(), self.step_gan)
+                        self.writer.add_scalar('pred_d/pred_dt_2', torch.sigmoid(dt_2).mean().item(), self.step_gan) 
+                        self.writer.add_scalar('pred_d/pred_ds_2', torch.sigmoid(ds_2).mean().item(), self.step_gan) 
+                        self.writer.add_scalar('pred_d/pred_dt_3', torch.sigmoid(dt_3).mean().item(), self.step_gan) 
+                        self.writer.add_scalar('pred_d/pred_ds_3', torch.sigmoid(ds_3).mean().item(), self.step_gan) 
+
+
                         # train YOLO
                         self.model.train()
                         self.set_requires_grad(self.d1, False)
@@ -582,16 +678,16 @@ class BaseTrainer:
                         self.set_requires_grad(self.d3, False)
                         # pred
                         yfsource = self.model(batch['img'], gan = True)
-                        # critic loss
-                        target_gt = Variable(torch.ones(self.batch_size)).long().to(self.device)
-                        d_domain_1 = torch.sigmoid(self.d1(yfsource[0]))
-                        d_domain_1_loss = 0.5*(torch.mean((1 - d_domain_1)**2)) # Weighted Least-squares (LS) Loss
+                        d_domain_1 = self.d1(yfsource[0])
+                        d_domain_1_loss = self.dcgan_cri(d_domain_1, target_gt) # logsoftmax for loss
                         d_domain_2 = self.d2(yfsource[1])
-                        d_domain_2_loss = self.dcgan_cri(d_domain_2, target_gt)
+                        d_domain_2_loss = self.dcgan_cri(d_domain_2, target_gt) # logsoftmax for loss
                         d_domain_3 = self.d3(yfsource[2])
-                        d_domain_3_loss = self.dcgan_cri(d_domain_3, target_gt)
+                        d_domain_3_loss = self.dcgan_cri(d_domain_3, target_gt) # logsoftmax for loss
 
-                        d_domain_loss = 10*(d_domain_1_loss + d_domain_2_loss + d_domain_3_loss)
+
+                        d_alpha = 10
+                        d_domain_loss = d_alpha*(d_domain_1_loss + d_domain_2_loss + d_domain_3_loss)
                         # backward 1
                         d_domain_loss.backward()
                         
@@ -697,11 +793,12 @@ class BaseTrainer:
         self.run_callbacks('teardown')
 
     def save_model(self):
-        if self.dcgan and s:
+        if self.dcgan:
             torch.save(self.d1.state_dict(), self.save_dir / 'd1.pth')
             torch.save(self.d2.state_dict(), self.save_dir / 'd2.pth')
             torch.save(self.d3.state_dict(), self.save_dir / 'd3.pth')
-
+        if self._onelayerdcgan:
+            torch.save(self.d3.state_dict(), self.save_dir / 'd3.pth')
         ckpt = {
             'epoch': self.epoch,
             'best_fitness': self.best_fitness,

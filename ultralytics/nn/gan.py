@@ -94,13 +94,23 @@ class D_layer4(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
-            ConvBlock(64, 128, kernel_size=3, stride=2, padding=1, act = True), # /2
-            ResBlock(128),
-            ConvBlock(128, 256, kernel_size=3, stride=2, padding=1, act = True), #/4
-            ResBlock(256),
-            ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), # /8
-            ResBlock(512),
-            ConvBlock(512, 1, kernel_size=1, stride=1, padding=0, act = False), # 16
+            # ConvBlock(64, 128, kernel_size=3, stride=2, padding=1, act = True), # /2
+            # ResBlock(128),
+            # ConvBlock(128, 256, kernel_size=3, stride=2, padding=1, act = True), #/4
+            # ResBlock(256),
+            # ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), # /8
+            # ResBlock(512),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.2),
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 1)
+            # nn.LogSoftmax(),
+            # ConvBlock(512, 1, kernel_size=1, stride=1, padding=0, act = False), # 16
         )
 
     def forward(self, x):
@@ -112,14 +122,19 @@ class D_layer6(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
-            ConvBlock(128, 256, kernel_size=3, stride=2, padding=1, act = True), # /2
-            ResBlock(256),
-            ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), #/4
-            ResBlock(512),
-            ConvBlock(512, 1024, kernel_size=3, stride=2, padding=1, act = True), # /8
+            # ConvBlock(128, 256, kernel_size=3, stride=2, padding=1, act = True), # /2
+            # ResBlock(256),
+            # ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), #/4
+            # ResBlock(512),
+            # ConvBlock(512, 1024, kernel_size=3, stride=2, padding=1, act = True), # /8
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(1024*10*10, 2),
-            nn.LogSoftmax(),
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 1)
+            # nn.Linear(1024*10*10, 2),
+            # nn.LogSoftmax(),
         )
 
     def forward(self, x):
@@ -130,14 +145,14 @@ class D_layer9(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
-            ConvBlock(256, 256, kernel_size=3, stride=2, padding=1, act = True), # /2
-            ResBlock(256),
-            ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), #/4
-            ResBlock(512),
+            # ConvBlock(256, 256, kernel_size=3, stride=2, padding=1, act = True), # /2
+            # ResBlock(256),
+            # ConvBlock(256, 512, kernel_size=3, stride=2, padding=1, act = True), #/4
+            # ResBlock(512),
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(512, 2),
-            nn.LogSoftmax(),
+            nn.Linear(256, 1),
+            # nn.Softmax(),
         )
     def forward(self, x):
         x = self.encoder(x)
