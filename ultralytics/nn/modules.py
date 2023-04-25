@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 
 from ultralytics.yolo.utils.tal import dist2bbox, make_anchors
+from ultralytics.nn.gradient_reversal import GradientReversalLayer
+from torch.nn.utils import spectral_norm
 
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
@@ -62,9 +64,13 @@ class ConvTranspose(nn.Module):
     def forward(self, x):
         return self.act(self.bn(self.conv_transpose(x)))
 
+    def forward_fuse(self, x):
+        return self.act(self.conv_transpose(x))
+
 
 class DFL(nn.Module):
-    # Integral module of Distribution Focal Loss (DFL) proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
+    # Integral module of Distribution Focal Loss (DFL)
+    # Proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
     def __init__(self, c1=16):
         super().__init__()
         self.conv = nn.Conv2d(c1, 1, 1, bias=False).requires_grad_(False)
@@ -171,7 +177,7 @@ class C2(nn.Module):
         self.m = nn.Sequential(*(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))
 
     def forward(self, x):
-        a, b = self.cv1(x).split((self.c, self.c), 1)
+        a, b = self.cv1(x).chunk(2, 1)
         return self.cv2(torch.cat((self.m(a), b), 1))
 
 
@@ -185,6 +191,11 @@ class C2f(nn.Module):
         self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
 
     def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
@@ -402,7 +413,12 @@ class Detect(nn.Module):
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        box, cls = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2).split((self.reg_max * 4, self.nc), 1)
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
+            box = x_cat[:, :self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4:]
+        else:
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
         y = torch.cat((dbox, cls.sigmoid()), 1)
         return y if self.export else (y, x)
@@ -453,4 +469,106 @@ class Classify(nn.Module):
     def forward(self, x):
         if isinstance(x, list):
             x = torch.cat(x, 1)
-        return self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+        x = self.linear(self.drop(self.pool(self.conv(x)).flatten(1)))
+        return x if self.training else x.softmax(1)
+
+
+#------------------------------------------------------- GAN ---------------------------------------------#
+class DomainConv(nn.Module):
+    def __init__(self, in_chan, out_chan) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            spectral_norm(nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # nn.Conv2d(in_chan, out_chan, kernel_size=3, stride=2, padding=1, bias = False),
+            # nn.InstanceNorm2d(out_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+            # nn.Conv2d(out_chan, out_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(out_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+        )
+    def forward(self, x):
+        return self.layer(x)
+  
+class DomainRes(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layer = nn.Sequential(
+            spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False)),
+            # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(in_chan, affine=True),
+            # nn.LeakyReLU(0.2, inplace=True),
+            # nn.Conv2d(in_chan, in_chan, kernel_size=3, stride=1, padding=1, bias = False),
+            # nn.InstanceNorm2d(in_chan, affine=True),
+        )
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+    def forward(self, x):
+        return self.act((x + self.layer(x))/math.sqrt(2))
+
+class Domain(nn.Module):
+    def __init__(self, in_chan, combine_res = 40) -> None:
+        super().__init__()
+        self.grl = GradientReversalLayer()
+        self.combine_res = combine_res
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 256),
+            DomainRes(256),
+            nn.Conv2d(256, 2, 1),
+            nn.AdaptiveAvgPool2d(output_size=(1, 1)),
+            nn.LogSoftmax(),
+        )
+    def forward(self, x, alpha = 1):
+        out = self.grl.apply(x, alpha)
+        return self.layers(out)
+
+
+class Critic(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 128),
+            DomainRes(128),
+            DomainConv(128, 256),
+            DomainRes(256),
+            DomainConv(256, 256),
+            nn.Conv2d(256, 1, 1, bias = False),
+        )
+    
+    # @staticmethod
+    # def init_weights(m):
+    #     if isinstance(m, nn.Conv2d):
+    #         nn.init.kaiming_normal_(m.weight)
+    #         if m.bias is not None:
+    #             nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class Discriminator(nn.Module):
+    def __init__(self, in_chan) -> None:
+        super().__init__()
+        self.layers = nn.Sequential(
+            DomainConv(in_chan, 128),
+            DomainRes(128),
+            DomainConv(128, 256),
+            DomainRes(256),
+            DomainConv(256, 256),
+            nn.Conv2d(256, 1, 1, bias = False),
+            # nn.Sigmoid()
+        )
+    
+    @staticmethod
+    def init_weights(m):
+        if isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        return self.layers(x)

@@ -1,15 +1,23 @@
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
-def vis(fm):
-    # plt.figure(figsize=(50, 10))
-    # print(fm)
-    layer_viz = fm.squeeze().detach()
-    print(layer_viz.size())
-    layer_viz = torch.sum(layer_viz, dim = 0)
-    print(layer_viz)
-    # for i, filter in enumerate(layer_viz):
-    #     if i == 16:
-    #         break
-        # plt.subplot(2, 8, i + 1)
-    plt.imshow(layer_viz)
-    plt.savefig('vis.png')
+import cv2
+def visualize_feature(features, save_path, source_img):
+    # B C H W
+    features = features[0] 
+    # C H W
+    features = torch.sum(features, dim=0)
+    features = np.array(features.cpu())
+    # H W
+
+    source_img = source_img[0].cpu()
+    source_img = source_img*255
+    source_img = np.array(source_img.permute(1, 2, 0), dtype='uint8')
+    source_img = cv2.cvtColor(cv2.resize(source_img, (features.shape[0], features.shape[1])), cv2.COLOR_BGR2GRAY)
+    
+
+    plot_img = np.hstack((source_img, features))
+    plt.imshow(plot_img)
+    plt.savefig(save_path)
+
+    plt.clf()
