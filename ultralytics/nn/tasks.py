@@ -58,10 +58,10 @@ class BaseModel(nn.Module):
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
-
-            if gan and (i == 4 or i == 6 or i == 9): # encoder
+            #(i == 4 or i == 6 or i == 8 or
+            if gan and (i == 15 or i == 18 or i == 21): # encoder
                 yolo_features.append(x)
-                if i == 9 and not full:
+                if i == 21 and not full:
                     return yolo_features
 
             if visualize:

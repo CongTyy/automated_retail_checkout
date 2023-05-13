@@ -12,7 +12,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-
+import copy
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -219,6 +219,7 @@ class BaseTrainer:
             callbacks.default_callbacks = callbacks_backup  # restore callbacks
         if RANK > -1:  # DDP
             dist.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
+        
         self.amp = bool(self.amp)  # as boolean
         self.scaler = amp.GradScaler(enabled=self.amp)
         if world_size > 1:
@@ -258,8 +259,10 @@ class BaseTrainer:
             self.val_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode='val')
             self.test_loader = self.get_dataloader(self.realset, batch_size=batch_size * 2, rank=-1, mode='val')
 
-            self.validator = self.get_validator(self.val_loader)
+
             self.test_real = self.get_validator(self.test_loader)
+            self.validator = self.get_validator(self.val_loader)
+            
             metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix='val')
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))  # TODO: init metrics for plot_results()?
             self.ema = ModelEMA(self.model)
@@ -303,19 +306,23 @@ class BaseTrainer:
         self.dcgan_cri = nn.BCEWithLogitsLoss()
 
         # -------------#
-        self.d1 = D_layer4().to(self.device)
-        # self.d1.apply(weights_init)
-        self.d1_optim = torch.optim.Adam(self.d1.parameters(), lr = 1e-3, betas=(0.5, 0.9))
+        # self.critic1 = D_layer4().to(self.device)
+        # # self.critic1.apply(weights_init)
+        # self.critic1_optim = torch.optim.RMSprop(self.critic1.parameters(), lr = 1e-4)#, betas=(0, 0.99))
 
-        self.d2 = D_layer6().to(self.device)
-        # self.d2.apply(weights_init)
-        self.d2_optim = torch.optim.Adam(self.d2.parameters(), lr = 1e-3, betas=(0.5, 0.9))
+        # self.critic2 = D_layer6().to(self.device)
+        # # self.critic2.apply(weights_init)
+        # self.critic2_optim = torch.optim.RMSprop(self.critic2.parameters(), lr = 1e-2)#, betas=(0, 0.99))
 
-        self.d3 = D_layer9().to(self.device)
-        # self.d3.apply(weights_init)
-        # self.d3.load_state_dict(torch.load("yolov8/one_layer_dcGAN/train4/d3.pth"))
-        self.d3_optim = torch.optim.Adam(self.d3.parameters(), lr = 1e-4, betas=(0.5, 0.9))
+        self.critic3 = D_layer9().to(self.device)
+        self.critic3_optim = torch.optim.RMSprop(self.critic3.parameters(), lr = 1e-3)#, betas=(0, 0.99))
+
+        # self.d3 = D_layer4().to(self.device)
+        # self.d3_optim = torch.optim.Adam(self.d3.parameters(), lr = 1e-4, betas=(0.5, 0.9))
         # ------------ #
+        # self.model_source = copy.deepcopy(self.model)
+        # for param in self.model_source.parameters():
+        #     param.requires_grad = False
 
 
     def _do_train(self, rank=-1, world_size=1):
@@ -339,6 +346,7 @@ class BaseTrainer:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
 
+
         for epoch in range(self.start_epoch, self.epochs):
             self.epoch = epoch
             self.run_callbacks('on_train_epoch_start')
@@ -361,62 +369,87 @@ class BaseTrainer:
             self.optimizer.zero_grad()
 
             real_batch_iter = self.loop_iterable(self.real_loader)
-            gan_flag = False
+            
             for i, batch in pbar:
                 self.run_callbacks('on_train_batch_start')
-                # Warmup
-                # ni = i + nb * epoch
-                # if ni <= nw:
-                #     xi = [0, nw]  # x interp
-                #     self.accumulate = max(1, np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round())
-                #     for j, x in enumerate(self.optimizer.param_groups):
-                #         # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-                #         x['lr'] = np.interp(
-                #             ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x['initial_lr'] * self.lf(epoch)])
-                #         if 'momentum' in x:
-                #             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
-
-                # Forward
-                # try:
-                    # batch_real = next(iter(self.real_pbar))[1]
-                    # batch_real = self.real_pbar.__next__()[1]
-                    # if len(batch_real['img']) != self.batch_size:
-                    #     self.real_pbar = enumerate(self.real_loader)
-                    #     batch_real = self.real_pbar.__next__()[1]
-                # except StopIteration:
-                #     self.real_pbar = enumerate(self.real_loader)
-                #     batch_real = next(iter(self.real_pbar))[1]
 
                 batch_real = next(real_batch_iter)
                 batch_real = self.preprocess_batch(batch_real)
                 batch = self.preprocess_batch(batch)
-                k_yolo = 5
-                k_critic = 10
-                # train YOLO
-                if gan_flag == False:
-                    self.set_requires_grad(self.d1, False)
-                    self.set_requires_grad(self.d2, False)
-                    self.set_requires_grad(self.d3, False)
-
-                    alpha = 0.01
-
+                k_yolo = 1
+                k_critic = 1
+                alpha_w1 = 0.01
+                alpha_w2 = 0.01
+                alpha_w3 = 0.1
+                gan_flag = True
+            
+                # self.set_requires_grad(self.critic1, True)
+                # self.set_requires_grad(self.critic2, True)
+                # self.set_requires_grad(self.critic3, True)
+                with torch.no_grad():
                     yfsource = self.model(batch['img'], gan = True)
                     yftarget = self.model(batch_real['img'], gan = True)
 
-                    yfsource_G0 = self.d1(yfsource[0])
-                    yftarget_G0 = self.d1(yftarget[0])
+                # critic_cost_0, critic_s0, critic_t0, gp_0, gradient_norm_0, error_0 = self.update_critic(self.critic1, yfsource[0], yftarget[0], self.critic1_optim)
+                # critic_cost_1, critic_s1, critic_t1, gp_1, gradient_norm_1, error_1 = self.update_critic(self.critic2, yfsource[1], yftarget[1], self.critic2_optim)
+                # critic_cost_2, critic_s2, critic_t2, gp_2, gradient_norm_2, error_2 = self.update_critic(self.critic3, yfsource[2], yftarget[2], self.critic3_optim)
+                # self.writer_scalar(critic_cost_0, critic_s0, critic_t0, gp_0, gradient_norm_0, yfsource[0], yftarget[0], w0, name = 'C_0')
+                # self.writer_scalar(critic_cost_1, critic_s1, critic_t1, gp_1, gradient_norm_1, yfsource[1], yftarget[1], name = 'C_1')
+                # self.writer_scalar(critic_cost_2, critic_s2, critic_t2, gp_2, gradient_norm_2, yfsource[2], yftarget[2], w1, name = 'C_2')
 
-                    yfsource_G1 = self.d2(yfsource[1])
-                    yftarget_G1 = self.d2(yftarget[1])
 
-                    yfsource_G2 = self.d3(yfsource[2])
-                    yftarget_G2 = self.d3(yftarget[2])
+                # critic_cost, critic_s, critic_t, gp, gradient_norm, w = self.update_critic(self.critic3, yfsource_cat, yftarget_cat, self.critic3_optim)
+                # self.writer_scalar(critic_cost, critic_s, critic_t, gp, gradient_norm, yfsource[2], yftarget[2], w, name = 'C_2')
+                # if epoch < 2:
+                for __ in range(k_critic):
+                    self.update_critic_v2(self.critic3, yfsource, yftarget, self.critic3_optim)
+                    self.step_gan += 1
+                
+                # else:
+                    #self.update_critic_v2(self.critic3, yfsource, yftarget, self.critic3_optim)
+                # self.step_gan += 1
 
-                    wasserstein_distance_1 = alpha * (yftarget_G0.mean() - yfsource_G0.mean())
-                    wasserstein_distance_2 = alpha * (yftarget_G1.mean() - yfsource_G1.mean()) 
-                    wasserstein_distance_3 = alpha * (yftarget_G2.mean() - yfsource_G2.mean()) 
+                # train YOLO
+                for ___ in range(k_yolo):
+                    wasserstein_distance_1 = 0
+                    wasserstein_distance_2 = 0
+                    wasserstein_distance_3 = 0
+                    # self.set_requires_grad(self.critic1, False)
+                    # self.set_requires_grad(self.critic2, False)
+                    # self.set_requires_grad(self.critic3, False)
+                    yfsource = self.model(batch['img'], gan = True)
+                    yftarget = self.model(batch_real['img'], gan = True)
 
-                    # wasserstein_distance.backward()
+                    # yfsource_G0 = self.critic1(yfsource[0])
+                    # yftarget_G0 = self.critic1(yftarget[0])
+                    # # yfsource_G1 = self.critic2(yfsource[1])
+                    # # yftarget_G1 = self.critic2(yftarget[1])
+                    # yfsource_G2 = self.critic3(yfsource[2])
+                    # yftarget_G2 = self.critic3(yftarget[2])
+
+                    # wasserstein_distance_1 = alpha_w1 * abs((yfsource_G0.mean() - yftarget_G0.mean()))
+                    # # wasserstein_distance_2 = alpha_w2 * abs((yfsource_G1.mean() - yftarget_G1.mean())) 
+                    # wasserstein_distance_3 = alpha_w3 * abs((yfsource_G2.mean() - yftarget_G2.mean())) 
+                    
+                    # # (wasserstein_distance_1 + wasserstein_distance_2 + wasserstein_distance_3).backward()
+
+                    # self.writer.add_scalar('domain/wasserstein_distance_1', wasserstein_distance_1.item(), self.step_yolo)
+                    # # self.writer.add_scalar('domain/wasserstein_distance_2', wasserstein_distance_2.item(), self.step_yolo)
+                    # self.writer.add_scalar('domain/wasserstein_distance_3', wasserstein_distance_3.item(), self.step_yolo)
+
+                    # yfsourceG0 = space_to_depth(yfsource[0], 4)
+                    # yftargetG0 = space_to_depth(yftarget[0], 4)
+
+                    # yfsource_cat = torch.concat((yfsourceG0, yfsource[2]), dim = 1)
+                    # yftarget_cat = torch.concat((yftargetG0, yftarget[2]), dim = 1)
+                    # yfsource_G2 = self.critic3(yfsource_cat)
+                    # yftarget_G2 = self.critic3(yftarget_cat)
+                    # wasserstein_distance_3 = alpha_w3 * ((yfsource_G2.mean() - yftarget_G2.mean()))
+                    # self.writer.add_scalar('domain/wasserstein_distance_3', wasserstein_distance_3.item(), self.step_yolo)
+                    wasserstein_distance_3 = self.g_loss(self.critic3, yfsource, yftarget, alpha = 1)
+
+
+                    # Ori YOLO
                     ni = i + nb * epoch
                     if ni <= nw:
                         xi = [0, nw]  # x interp
@@ -427,82 +460,41 @@ class BaseTrainer:
                                 ni, xi, [self.args.warmup_bias_lr if j == 0 else 0.0, x['initial_lr'] * self.lf(epoch)])
                             if 'momentum' in x:
                                 x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
-
+                
                     with torch.cuda.amp.autocast(self.amp):
                         preds = self.model(batch['img'])
-
                         self.loss, self.loss_items = self.criterion(preds, batch)
-                        
-                        self.writer.add_scalar('domain/yolo_loss', self.loss.item(), self.step_yolo)
-                        self.writer.add_scalar('domain/wasserstein_distance_1', wasserstein_distance_1.item(), self.step_yolo)
-                        self.writer.add_scalar('domain/wasserstein_distance_2', wasserstein_distance_2.item(), self.step_yolo)
-                        self.writer.add_scalar('domain/wasserstein_distance_3', wasserstein_distance_3.item(), self.step_yolo)
                     
-                    if rank != -1:
-                        self.loss *= world_size
-                    self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
-                        else self.loss_items
-                    self.scaler.scale(self.loss + 0.01*wasserstein_distance_1 + wasserstein_distance_2 + wasserstein_distance_3).backward()
-                    if ni - last_opt_step >= self.accumulate:
-                        self.optimizer_step()
-                        last_opt_step = ni
+                    # self.tloss = torch.tensor([0.0, 0.0, 0.0], device=self.device)
+                    # self.loss_items = self.tloss
+                        if rank != -1:
+                            self.loss *= world_size
+                        self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
+                            else self.loss_items
+                        
+
+                    self.writer.add_scalar('domain/yolo_loss', self.loss.item(), self.step_yolo)
+                    self.scaler.scale(self.loss + wasserstein_distance_3).backward()
+                    # if ni - last_opt_step >= self.accumulate:
+                    #     self.optimizer_step()
+                    #     last_opt_step = ni
+                    self.optimizer_step()
+                    mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
+                    loss_len = self.tloss.shape[0] if len(self.tloss.size()) else 1
+                    losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
+                    if rank in (-1, 0):
+                        pbar.set_description(
+                            ('%11s' * 2 + '%11.4g' * (2 + loss_len)) %
+                            (f'{epoch + 1}/{self.epochs}', mem, *losses, batch['cls'].shape[0], batch['img'].shape[-1]))
+                        self.run_callbacks('on_batch_end')
+                        if self.args.plots and ni in self.plot_idx:
+                            self.plot_training_samples(batch, ni)
+
+                    self.run_callbacks('on_train_batch_end')
+
+                    
                     self.step_yolo += 1
 
-                    if (self.step_yolo+1) % k_yolo != 0:
-                        continue
-
-                gan_flag = True
-                if gan_flag:
-
-                    self.set_requires_grad(self.d1, True)
-                    self.set_requires_grad(self.d2, True)
-                    self.set_requires_grad(self.d3, True)
-                    with torch.no_grad():
-                        yfsource = self.model(batch['img'], gan = True)
-                        yftarget = self.model(batch_real['img'], gan = True)
-                        
-                        # yfsource_C = yfsource[2].detach()
-                        # yftarget_C = yftarget[2].detach()
-                    
-                    
-                    critic_cost_0, critic_s0, critic_t0, gp_0, gradient_norm_0, error_0 = self.update_critic(self.d1, yfsource[0], yftarget[0], self.d1_optim)
-                    critic_cost_1, critic_s1, critic_t1, gp_1, gradient_norm_1, error_1 = self.update_critic(self.d2, yfsource[1], yftarget[1], self.d2_optim)
-                    critic_cost_2, critic_s2, critic_t2, gp_2, gradient_norm_2, error_2 = self.update_critic(self.d3, yfsource[2], yftarget[2], self.d3_optim)
-
-                    self.writer.add_scalar('C_0/critic_cost', critic_cost_0.item(), self.step_gan)
-                    self.writer.add_scalar('C_0/critic_s', critic_s0.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_0/critic_t', critic_t0.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_0/gp3', gp_0.item(), self.step_gan) 
-                    self.writer.add_scalar('C_0/gradient_norm', gradient_norm_0.mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_0/yfs', yfsource[0].mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_0/yft', yftarget[0].mean().item(), self.step_gan)
-
-
-                    self.writer.add_scalar('C_1/critic_cost', critic_cost_1.item(), self.step_gan)
-                    self.writer.add_scalar('C_1/critic_s', critic_s1.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_1/critic_t', critic_t1.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_1/gp3', gp_1.item(), self.step_gan) 
-                    self.writer.add_scalar('C_1/gradient_norm', gradient_norm_1.mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_1/yfs', yfsource[1].mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_1/yft', yftarget[1].mean().item(), self.step_gan)
-
-
-                    self.writer.add_scalar('C_2/critic_cost', critic_cost_2.item(), self.step_gan)
-                    self.writer.add_scalar('C_2/critic_s', critic_s2.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_2/critic_t', critic_t2.mean().item(), self.step_gan) 
-                    self.writer.add_scalar('C_2/gp3', gp_2.item(), self.step_gan) 
-                    self.writer.add_scalar('C_2/gradient_norm', gradient_norm_2.mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_2/yfs', yfsource[2].mean().item(), self.step_gan)
-                    self.writer.add_scalar('C_2/yft', yftarget[2].mean().item(), self.step_gan)
-
-
-
-                    self.step_gan += 1
-                    if (self.step_gan+1) % k_critic != 0:
-                        continue
-                    
-                gan_flag = False
-                
                 # Backward
                 # self.scaler.scale(self.loss).backward()
                 # # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
@@ -510,21 +502,8 @@ class BaseTrainer:
                 #     self.optimizer_step()
                 #     last_opt_step = ni
                 # Log
-                mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # (GB)
-                loss_len = self.tloss.shape[0] if len(self.tloss.size()) else 1
-                losses = self.tloss if loss_len > 1 else torch.unsqueeze(self.tloss, 0)
-                if rank in (-1, 0):
-                    pbar.set_description(
-                        ('%11s' * 2 + '%11.4g' * (2 + loss_len)) %
-                        (f'{epoch + 1}/{self.epochs}', mem, *losses, batch['cls'].shape[0], batch['img'].shape[-1]))
-                    self.run_callbacks('on_batch_end')
-                    if self.args.plots and ni in self.plot_idx:
-                        self.plot_training_samples(batch, ni)
-
-                self.run_callbacks('on_train_batch_end')
 
             self.lr = {f'lr/pg{ir}': x['lr'] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
-
             self.scheduler.step()
             self.run_callbacks('on_train_epoch_end')
 
@@ -574,39 +553,170 @@ class BaseTrainer:
         torch.cuda.empty_cache()
         self.run_callbacks('teardown')
 
+
+    def writer_scalar(self, critic_cost_2, critic_s2, critic_t2, gp_2, gradient_norm_2, yfsource, yftarget, w, name = 'C_1'):
+        self.writer.add_scalar(f'{name}/critic_cost', critic_cost_2.item(), self.step_gan)
+        self.writer.add_scalar(f'{name}/critic_s', critic_s2.mean().item(), self.step_gan) 
+        self.writer.add_scalar(f'{name}/critic_t', critic_t2.mean().item(), self.step_gan) 
+        self.writer.add_scalar(f'{name}/gp3', gp_2, self.step_gan) 
+        self.writer.add_scalar(f'{name}/gradient_norm', gradient_norm_2, self.step_gan)
+        self.writer.add_scalar(f'{name}/yfs', yfsource.max().item(), self.step_gan)
+        self.writer.add_scalar(f'{name}/yft', yftarget.max().item(), self.step_gan)
+        self.writer.add_scalar(f'{name}/wass', w.item(), self.step_gan)
+        # self.writer.add_scalar(f'{name}/dc_loss', dc_loss.item(), self.step_gan)
+
+
+
     @staticmethod
     def loop_iterable(iterable):
         while True:
             yield from iterable
 
-    def update_critic(self, model, fake, real, optim):
-        error = 0
-        gp, gradient_norm = self.gradient_penalty(model, fake, real, LAMBDA = 10)
-        critic_s = model(fake)
-        critic_t = model(real)
+    @staticmethod
+    def check_loss_critic(loss, upper_clip= 50, lower_clip=0.05):
+        loss = torch.clamp(loss, min = lower_clip, max=upper_clip) if loss.item() > 0 else torch.clamp(loss, min = -upper_clip, max=-lower_clip)
+        # if loss > upper_clip:
+        #     temp = upper_clip/loss
+        #     loss *= temp
+        # elif 0 < loss < lower_clip:
+        #     temp = lower_clip/loss
+        #     loss *= temp
+        # elif -lower_clip < loss < 0:
+        #     temp = lower_clip/loss
+        #     loss *= temp
+        # elif loss < -upper_clip:
+        #     temp = lower_clip/loss
+        #     loss *= temp
 
-        wasserstein_distance = critic_t.mean() - critic_s.mean()
+        return loss
+
+
+    def update_critic(self, model, source, target, optim):
+        gradient_norm = 0
+        gp = 0
+        gp, gradient_norm = self.gradient_penalty(model, source, target, LAMBDA = 5)
+        critic_s = model(source)
+        critic_t = model(target)
+        wasserstein_distance = (critic_s.mean() - critic_t.mean())
         critic_cost = -wasserstein_distance + gp
-
-        # if critic_s.mean() == 0 or critic_t.mean() == 0:
-        #     critic_cost += 10e-3
-        #     optim.zero_grad()
-        #     critic_cost.backward()
-        #     optim.step()
-            
-        #     error = 1
-        #     return critic_cost, critic_s, critic_t, gp, gradient_norm, error
-        
         optim.zero_grad()
         critic_cost.backward()
         optim.step()
         # for param in model.parameters():
         #     param.data.clamp_(-self.weight_cliping_limit, self.weight_cliping_limit)
-        return critic_cost, critic_s, critic_t, gp, gradient_norm, error
+        return critic_cost, critic_s.mean(), critic_t.mean(), gp.item(), gradient_norm.mean().item(), wasserstein_distance
+        # return critic_cost, critic_s, critic_t, gp, gradient_norm, error
 
+    @staticmethod
+    def set_requires_grad(model, requires_grad=True):
+        for param in model.parameters():
+            param.requires_grad = requires_grad
+
+    def dcgan_loss(self, pred, isreal):
+        gt = torch.ones((self.batch_size, pred.size(1)), requires_grad=False, device=self.device) if isreal else torch.zeros((self.batch_size, pred.size(1)), requires_grad=False, device=self.device)
+        loss = self.dcgan_cri(pred, gt)
+        return loss
+    
+    def update_critic_v2(self, model, yfsource, yftarget, optim):
+        '''
+        4: 64 160 160
+        6: 128 80 80
+        8: 256 40 40 
+        '''
+        self.set_requires_grad(model, True)
+        gradient_norm = 0
+        gp = 0
+        _sources = []
+        _targets = []
+        for m, (source, target) in enumerate(zip(yfsource, yftarget)):
+            # if m == 2 or m == 5:
+            #     _sources.append(source)
+            #     _targets.append(target)
+            # else:
+            #     k = source.size(2)//40
+            #     _sources.append(space_to_depth(source, k))
+            #     _targets.append(space_to_depth(target, k))
+            if m != 2:
+                _sources.append(space_to_depth(source, int(4/(m+1))))
+                _targets.append(space_to_depth(target, int(4/(m+1))))
+            else:
+                _sources.append(source)
+                _targets.append(target)
+        yfsource_cat = torch.concat(_sources, dim = 1)
+        yftarget_cat = torch.concat(_targets, dim = 1)
+
+        gp, gradient_norm = self.gradient_penalty(model, yfsource_cat, yftarget_cat, LAMBDA = 5)
+        critic_s = model(yfsource_cat)
+        critic_t = model(yftarget_cat)
+        wasserstein_distance = (critic_s.mean() - critic_t.mean())
+        # dc_loss = 0.1*  0.5 * (self.dcgan_loss(critic_s, isreal= True) + self.dcgan_loss(critic_t, isreal=False))
+        critic_cost = -wasserstein_distance  + gp
+
+        optim.zero_grad()
+        critic_cost.backward()
+        optim.step()
+        
+        # for param in model.parameters():
+        #     param.data.clamp_(-self.weight_cliping_limit, self.weight_cliping_limit)
+
+        self.writer_scalar(critic_cost, critic_s, critic_t, gp.item(), gradient_norm.mean().item(), yfsource_cat, yftarget_cat, wasserstein_distance, name = 'C_2')
+
+    def g_loss(self, model, yfsource, yftarget, alpha = 1):
+        self.set_requires_grad(model, False)
+        _sources = []
+        _targets = []
+        for m, (source, target) in enumerate(zip(yfsource, yftarget)):
+            # if m == 2 or m == 5:
+            #     _sources.append(source)
+            #     _targets.append(target)
+            # else:
+            #     k = source.size(2)//40
+            #     _sources.append(space_to_depth(source, k))
+            #     _targets.append(space_to_depth(target, k))
+            # target = target.float()
+            if m != 2:
+                _sources.append(space_to_depth(source, int(4/(m+1))))
+                _targets.append(space_to_depth(target, int(4/(m+1))))
+            else:
+                _sources.append(source)
+                _targets.append(target)
+        yfsource_cat = torch.concat(_sources, dim = 1)
+        yftarget_cat = torch.concat(_targets, dim = 1)
+        critic_s = model(yfsource_cat)
+        critic_t = model(yftarget_cat)
+        wasserstein_distance = alpha* (critic_s.mean() - critic_t.mean()) 
+        # dc_loss = 0.1 * self.dcgan_loss(critic_t, isreal=True)
+
+        self.writer.add_scalar('domain/wasserstein_distance_3', wasserstein_distance.item(), self.step_yolo)
+        # self.writer.add_scalar('domain/dc_loss', dc_loss.item(), self.step_yolo)
+
+        return wasserstein_distance
+    @staticmethod
+    def gradient_penalty(critic, source_feature, target_feature, LAMBDA = 10):
+        device = source_feature.device
+        alpha = torch.FloatTensor(source_feature.size(0),source_feature.size(1),source_feature.size(2),source_feature.size(3)).uniform_(0,1)
+        alpha = alpha.to(device)
+
+        interpolated = alpha*target_feature + (1- alpha)*source_feature
+        interpolated = interpolated.to(device)
+
+        # define it to calculate gradient
+        # interpolated = torch.concat([interpolated, source_feature, target_feature], dim = 0).requires_grad_()
+        interpolated = Variable(interpolated, requires_grad=True)
+        prob_interpolated = critic(interpolated)
+
+        # calculate gradients of probabilities with respect to examples
+        gradients = autograd.grad(  outputs=prob_interpolated, 
+                                    inputs=interpolated,
+                                    grad_outputs=torch.ones(prob_interpolated.size()).to(device),
+                                    create_graph=True, 
+                                    retain_graph=True)[0]
+        gradient_norm = gradients.norm(2, dim=1)
+        grad_penalty = ((gradient_norm - 1)**2).mean()
+        return grad_penalty*LAMBDA, gradient_norm
 
     def save_model(self):
-        torch.save(self.d3.state_dict(), self.save_dir / f'd3_{self.epoch}.pth')
+        torch.save(self.critic3.state_dict(), self.save_dir / f'critic3_{self.epoch}.pth')
         ckpt = {
             'epoch': self.epoch,
             'best_fitness': self.best_fitness,
@@ -834,37 +944,26 @@ class BaseTrainer:
         LOGGER.info(f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}) with parameter groups "
                     f'{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias')
         return optimizer
-    @staticmethod
-    def gradient_penalty(critic, fake_data, real_data, LAMBDA = 10):
-        device = fake_data.device
-        # alpha = torch.rand(fake_data.size(0), 1).to(device)
-        alpha = torch.rand_like(fake_data).to(device)
-        differences = real_data - fake_data
-        interpolates = fake_data + (alpha * differences)
-        # interpolates = torch.stack([interpolates, fake_data, real_data]).requires_grad_()
-        interpolates = torch.concat([interpolates, fake_data, real_data], dim = 0).requires_grad_()
-        # interpolates = interpolates.requires_grad_()
+    # @staticmethod
+    # def gradient_penalty(critic, fake_data, real_data, LAMBDA = 10):
+    #     device = fake_data.device
+    #     # alpha = torch.rand(fake_data.size(0), 1).to(device)
+    #     alpha = torch.rand_like(fake_data).to(device)
+    #     differences = real_data - fake_data
+    #     interpolates = fake_data + (alpha * differences)
+    #     # interpolates = torch.stack([interpolates, fake_data, real_data]).requires_grad_()
+    #     interpolates = torch.concat([interpolates, fake_data, real_data], dim = 0).requires_grad_()
+    #     # interpolates = interpolates.requires_grad_()
 
-        preds = critic(interpolates)
-        gradients = grad(preds, interpolates,
-                        grad_outputs=torch.ones_like(preds),
-                        retain_graph=True, create_graph=True)[0]
-        gradient_norm = gradients.norm(2, dim=1)
-        gradient_penalty = ((gradient_norm - 1)**2).mean()
-        return LAMBDA*gradient_penalty, gradient_norm
+    #     preds = critic(interpolates)
+    #     gradients = grad(preds, interpolates,
+    #                     grad_outputs=torch.ones_like(preds),
+    #                     retain_graph=True, create_graph=True)[0]
+    #     gradient_norm = gradients.norm(2, dim=1)
+    #     gradient_penalty = ((gradient_norm - 1)**2).mean()
+    #     return LAMBDA*gradient_penalty, gradient_norm
+    
 
-    @staticmethod
-    def set_requires_grad(model, requires_grad=True):
-        for param in model.parameters():
-            param.requires_grad = requires_grad
-
-    def dcgan_loss(self, pred, isreal):
-        
-
-        gt = torch.ones((self.batch_size, 1, pred.size(0), pred.size(1)), requires_grad=False) if isreal else torch.zeros((self.batch_size, 1, pred.size(0), pred.size(1)), requires_grad=False)
-        
-        loss = self.dcgan_cri(pred, gt)
-        return loss
 
 def check_amp(model):
     """
@@ -909,13 +1008,39 @@ def check_amp(model):
         return False
     return True
 
-    
-def integrating(tensor, kernel):
-    chan = tensor.size(1)
-    batch = tensor.size(0)
-    feature_stacks = []
-    for b in range(batch):
-        feature_stacks.append(torch.dstack([tensor[b,c,i::kernel,j::kernel] for i in range(kernel) for j in range(kernel) for c in range(chan)]))
 
-    feature_stacks = torch.stack(feature_stacks)
-    return feature_stacks.permute((0, 3, 1, 2))
+def space_to_depth(x, block_size):
+    n, c, h, w = x.size()
+    unfolded_x = torch.nn.functional.unfold(x, block_size, stride=block_size)
+    return unfolded_x.view(n, c * block_size ** 2, h // block_size, w // block_size)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
